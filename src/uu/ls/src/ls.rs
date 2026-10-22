@@ -1382,6 +1382,23 @@ impl DirId {
     }
 }
 
+/// Skua (M3-SH9): the path `ls -R` lists a subdirectory under. On Windows it is joined with `/`,
+/// as GNU ls in Git Bash prints it (`./src:`, not `.\src:`); Windows accepts `/` in paths.
+fn recursive_child_path(parent: &Path, child: &Path) -> PathBuf {
+    #[cfg(windows)]
+    if let Some(name) = child.file_name() {
+        let mut joined = parent.as_os_str().to_owned();
+        let parent_text = parent.to_string_lossy();
+        if !parent_text.ends_with('/') && !parent_text.ends_with('\\') {
+            joined.push("/");
+        }
+        joined.push(name);
+        return PathBuf::from(joined);
+    }
+    let _ = parent;
+    child.to_path_buf()
+}
+
 /// Recursively traverse directories using an explicit stack.
 ///
 /// This avoids deep recursive call chains while preserving GNU-style
@@ -1480,7 +1497,7 @@ fn enter_directory<O: LsOutput>(
                 .filter(|p| p.file_type().is_some_and(FileType::is_dir) && !p.is_dot_dir)
                 .rev()
             {
-                let child_path = child.path().to_path_buf();
+                let child_path = recursive_child_path(&entry.path, child.path());
                 let child_must_dereference = child.must_dereference;
                 let child_command_line = child.command_line;
 

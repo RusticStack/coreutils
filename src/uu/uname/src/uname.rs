@@ -97,8 +97,18 @@ impl UNameOutput {
             || opts.processor
             || opts.hardware_platform);
 
-        let kernel_name = (opts.kernel_name || opts.all || opts.all_labeled || none)
-            .then(|| uname.sysname().to_owned());
+        // Skua (M3-SH9): on Windows, the kernel and OS names Git Bash prints
+        // (`MINGW64_NT-10.0-26300`, `Msys`), so scripts that match `MINGW*|MSYS*|CYGWIN*` to
+        // detect Windows work in Skua Bash (whose `$OSTYPE` is `msys`).
+        let kernel_name = (opts.kernel_name || opts.all || opts.all_labeled || none).then(|| {
+            if cfg!(windows) {
+                let release = uname.release().to_string_lossy();
+                let version = uname.version().to_string_lossy();
+                format!("MINGW64_NT-{release}-{version}").into()
+            } else {
+                uname.sysname().to_owned()
+            }
+        });
 
         let nodename =
             (opts.nodename || opts.all || opts.all_labeled).then(|| uname.nodename().to_owned());
@@ -112,7 +122,13 @@ impl UNameOutput {
         let machine =
             (opts.machine || opts.all || opts.all_labeled).then(|| uname.machine().to_owned());
 
-        let os = (opts.os || opts.all || opts.all_labeled).then(|| uname.osname().to_owned());
+        let os = (opts.os || opts.all || opts.all_labeled).then(|| {
+            if cfg!(windows) {
+                "Msys".into()
+            } else {
+                uname.osname().to_owned()
+            }
+        });
 
         // This option is unsupported on modern Linux systems
         // See: https://lists.gnu.org/archive/html/bug-coreutils/2005-09/msg00063.html

@@ -135,11 +135,15 @@ fn test_uname_operating_system() {
         .arg("--operating-system")
         .succeeds()
         .stdout_is("Redox\n");
+    // Skua: Git Bash's values on Windows (`Msys`, `MINGW64_NT-<release>-<build>`).
     #[cfg(windows)]
     {
-        let result = new_ucmd!().arg("--operating-system").succeeds();
-        println!("{:?}", result.stdout_str());
-        assert!(result.stdout_str().starts_with("MS/Windows"));
+        new_ucmd!()
+            .arg("--operating-system")
+            .succeeds()
+            .stdout_is("Msys\n");
+        let result = new_ucmd!().arg("-s").succeeds();
+        assert!(result.stdout_str().starts_with("MINGW64_NT-"));
     }
 }
 

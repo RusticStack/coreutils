@@ -406,11 +406,24 @@ static UTIL_NAME: LazyLock<String> = LazyLock::new(|| {
     // Strip directory path to show only utility name
     // (e.g., "mkdir" instead of "./target/debug/mkdir")
     // in version output, error messages, and other user-facing output
-    std::path::Path::new(&ARGV[argv_index])
+    let name = std::path::Path::new(&ARGV[argv_index])
         .file_name()
         .unwrap_or(&ARGV[argv_index])
         .to_string_lossy()
-        .into_owned()
+        .into_owned();
+    // Skua: on Windows a tool started as `ls.exe` (a hardlink or PATH lookup) says `ls: ...`
+    // in its messages, as Git Bash's tools do, not `ls.exe: ...`.
+    #[cfg(windows)]
+    if let Some(i) = name.len().checked_sub(4) {
+        if i > 0
+            && name
+                .get(i..)
+                .is_some_and(|ext| ext.eq_ignore_ascii_case(".exe"))
+        {
+            return name[..i].to_owned();
+        }
+    }
+    name
 });
 
 /// Derive the utility name.

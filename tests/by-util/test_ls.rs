@@ -674,7 +674,8 @@ fn test_ls_only_dirs_formatting() {
     #[cfg(windows)]
     {
         scene.ucmd().arg("-1").arg("-R").succeeds().stdout_only(
-            ".:\nsome-dir1\nsome-dir2\nsome-dir3\n\n.\\some-dir1:\n\n.\\some-dir2:\n\n.\\some-dir3:\n",
+            // Skua: subdirectories joined with `/` on Windows, as Git Bash's ls prints them.
+            ".:\nsome-dir1\nsome-dir2\nsome-dir3\n\n./some-dir1:\n\n./some-dir2:\n\n./some-dir3:\n",
         );
     }
 }
@@ -2802,10 +2803,8 @@ fn test_ls_recursive() {
         .arg("z")
         .succeeds();
 
-    #[cfg(not(windows))]
+    // Skua: `/` on Windows too, as Git Bash's ls prints it.
     result.stdout_contains("a/b:\nb");
-    #[cfg(windows)]
-    result.stdout_contains("a\\b:\nb");
 }
 
 #[test]
@@ -2823,10 +2822,8 @@ fn test_ls_recursive_1() {
     at.touch("f");
     at.touch("a/1/I");
     at.touch("a/1/II");
-    #[cfg(unix)]
+    // Skua: `/` on Windows too, as Git Bash's ls prints it.
     let out = "a:\n1\n2\n3\n\na/1:\nI\nII\n\na/2:\n\na/3:\n\nb:\n\nc:\n";
-    #[cfg(windows)]
-    let out = "a:\n1\n2\n3\n\na\\1:\nI\nII\n\na\\2:\n\na\\3:\n\nb:\n\nc:\n";
     scene
         .ucmd()
         .arg("-R1")
@@ -2850,10 +2847,8 @@ fn test_ls_recursive_all_with_version_sort_does_not_walk_up() {
     at.mkdir("a/b");
     at.mkdir("a/b/c");
 
-    #[cfg(unix)]
+    // Skua: `/` on Windows too, as Git Bash's ls prints it.
     let out = "a/b:\n.\n..\nc\n\na/b/c:\n.\n..\n";
-    #[cfg(windows)]
-    let out = "a/b:\n.\n..\nc\n\na/b\\c:\n.\n..\n";
     scene
         .ucmd()
         .arg("-aRv")
@@ -6434,10 +6429,8 @@ fn test_ls_subdired_complex() {
         .collect();
 
     println!("Extracted dirnames: {dirnames:?}");
-    #[cfg(unix)]
+    // Skua: `/` on Windows too, as Git Bash's ls prints it.
     assert_eq!(dirnames, vec!["dir1", "dir1/c2", "dir1/d"]);
-    #[cfg(windows)]
-    assert_eq!(dirnames, vec!["dir1", "dir1\\c2", "dir1\\d"]);
 }
 
 #[test]
@@ -6889,11 +6882,10 @@ fn test_ls_hyperlink_recursive_dirs() {
         &format!("{path}{separator}{dir_a}{separator}{dir_b}\x1b\\{dir_b}\x1b]8;;\x1b\\")
     );
     assert!(matches!(lines.next(), Some(l) if l.is_empty()));
+    // Skua: the heading joins with `/` on Windows too (the link target stays canonical).
     assert_hyperlink!(
         lines.next(),
-        &format!(
-            "{path}{separator}{dir_a}{separator}{dir_b}\x1b\\{dir_a}{separator}{dir_b}\x1b]8;;\x1b\\:"
-        )
+        &format!("{path}{separator}{dir_a}{separator}{dir_b}\x1b\\{dir_a}/{dir_b}\x1b]8;;\x1b\\:")
     );
 }
 
