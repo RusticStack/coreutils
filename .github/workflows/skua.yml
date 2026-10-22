@@ -1,0 +1,47 @@
+name: Skua
+# Skua Bash's coreutils (RusticStack/coreutils, branch `skua`): build what Skua ships and run the tests that apply on Windows. Upstream workflows are disabled on this fork.
+on:
+  push:
+    branches: [ skua ]
+  pull_request:
+    branches: [ skua ]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_INCREMENTAL: 0
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+jobs:
+  windows:
+    runs-on: blacksmith-4vcpu-windows-2025
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up rust toolchain
+        shell: bash
+        # No rust-toolchain file in this repo: stable, as upstream's CICD uses.
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
+          rustc --version
+          cargo --version
+      - uses: taiki-e/install-action@ab6895351a88b908e96a4697860d4ffea5e57dbe # v2.87.27
+        with:
+          tool: cargo-nextest
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Build (as Skua Bash builds it)
+        # Same command as skua-bash skua/build-uutils.ps1 (skua/uutils.toml).
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc --features windows,stat,chmod --bin coreutils
+      - name: Test coreutils (tests/by-util for every util Skua ships)
+        # Upstream's Windows test recipe (CICD.yml build_rust_stable) with Skua's feature set:
+        # feat_os_windows + stat + chmod, so test_ls, test_stat_windows and test_chmod_windows run.
+        run: cargo nextest run --hide-progress-bar --profile ci --locked --features windows,stat,chmod
+      - name: Test uucore and the crates Skua changed (unit tests)
+        run: cargo nextest run --hide-progress-bar --profile ci --locked -p uucore -p uu_ls -p uu_stat -p uu_chmod -p uu_cat -p uu_tail -p uu_tr -p uu_yes --no-tests=warn
