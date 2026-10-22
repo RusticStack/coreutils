@@ -1270,6 +1270,11 @@ fn create_hyperlink(name: &OsStr, path: &PathData) -> OsString {
 fn is_hidden(file_path: &DirEntry) -> bool {
     #[cfg(windows)]
     {
+        // A dot file is hidden as on Unix (Git Bash and MSYS2 `ls` agree); so is a file with
+        // the Windows hidden attribute.
+        if file_path.file_name().as_encoded_bytes().starts_with(b".") {
+            return true;
+        }
         let metadata = file_path.metadata().unwrap();
         let attr = metadata.file_attributes();
         (attr & 0x2) > 0

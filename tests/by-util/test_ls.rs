@@ -3960,6 +3960,26 @@ fn test_ls_hidden_windows() {
 
 #[cfg(windows)]
 #[test]
+fn test_ls_dot_files_hidden_windows() {
+    let scene = TestScenario::new(util_name!());
+    let at = &scene.fixtures;
+    at.touch(".dotfile");
+    at.mkdir(".dotdir");
+    at.touch("visible");
+    scene.ucmd().arg("-1").succeeds().stdout_is(
+        "visible
+",
+    );
+    scene
+        .ucmd()
+        .arg("-A")
+        .succeeds()
+        .stdout_contains(".dotfile")
+        .stdout_contains(".dotdir");
+}
+
+#[cfg(windows)]
+#[test]
 fn test_ls_hidden_link_windows() {
     let scene = TestScenario::new(util_name!());
     let at = &scene.fixtures;
