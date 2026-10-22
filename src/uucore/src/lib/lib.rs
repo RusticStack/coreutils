@@ -275,6 +275,7 @@ macro_rules! bin {
         ::uucore::bin_inner! {$util, {
             // (defensively) flush stdout for utility prior to exit; see <https://github.com/rust-lang/rust/issues/23818>
             if let Err(e) = std::io::stdout().flush() {
+                uucore::error::exit_if_stdout_pipe_closed();
                 eprintln!("Error flushing stdout: {e}");
             }
         }}

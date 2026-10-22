@@ -565,7 +565,7 @@ fn unbounded_tail<T: Read>(reader: &mut BufReader<T>, settings: &Settings) -> UR
     #[cfg(windows)]
     writer.flush().inspect_err(|err| {
         if err.kind() == ErrorKind::BrokenPipe {
-            std::process::exit(13);
+            std::process::exit(141); // Skua patch: 141, as bash reports a SIGPIPE death
         }
     })?;
     Ok(())

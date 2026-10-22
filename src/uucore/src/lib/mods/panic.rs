@@ -39,6 +39,9 @@ pub fn mute_sigpipe_panic() {
     panic::set_hook(Box::new(move |info| {
         if !is_broken_pipe(info) {
             hook(info);
+        } else if cfg!(windows) {
+            // Skua patch: no SIGPIPE on Windows; exit as bash reports a SIGPIPE death.
+            std::process::exit(141);
         }
     }));
 }

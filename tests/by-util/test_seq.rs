@@ -736,7 +736,10 @@ fn test_infinite_sequence(#[case] args: &[&str], #[case] expected_start: &[u8]) 
         .run_stdout_starts_with(expected_start);
     #[cfg(unix)]
     result.signal_name_is("PIPE");
-    #[cfg(not(unix))]
+    // Skua patch: on Windows seq exits 141, as bash reports a SIGPIPE death.
+    #[cfg(windows)]
+    result.code_is(141);
+    #[cfg(not(any(unix, windows)))]
     result.success();
 }
 

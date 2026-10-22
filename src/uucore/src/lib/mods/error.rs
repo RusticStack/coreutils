@@ -94,11 +94,75 @@ pub fn set_exit_code(code: i32) {
     EXIT_CODE.store(code, Ordering::SeqCst);
 }
 
+/// Exit silently with status 141 when standard output is a pipe whose reader has gone.
+///
+/// On Unix, writing to such a pipe raises `SIGPIPE` and the process dies without a message (the
+/// shell reports 141). Windows has no `SIGPIPE`: the write fails with `ERROR_NO_DATA` or
+/// `ERROR_BROKEN_PIPE`, and a utility would print "Broken pipe" and often carry on. Calling this
+/// before any diagnostic makes `seq 100000 | head -1` quiet on Windows too. Does nothing on other
+/// platforms. (Skua patch.)
+pub fn exit_if_stdout_pipe_closed() {
+    #[cfg(windows)]
+    if windows_pipe::stdout_pipe_closed() {
+        std::process::exit(141);
+    }
+}
+
+#[cfg(windows)]
+mod windows_pipe {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+
+    const ERROR_BROKEN_PIPE: i32 = 109;
+    const ERROR_NO_DATA: i32 = 232;
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn WriteFile(
+            file: *mut c_void,
+            buffer: *const u8,
+            len: u32,
+            written: *mut u32,
+            overlapped: *mut c_void,
+        ) -> i32;
+    }
+
+    /// Whether a zero-byte write to stdout fails because the pipe's reader has gone. The write
+    /// passes an `OVERLAPPED` block so that it is also valid on an overlapped pipe handle; the
+    /// block and the byte count are leaked (32 bytes, only on the error path) so that a write
+    /// that completes later never touches freed memory.
+    pub(super) fn stdout_pipe_closed() -> bool {
+        let handle = std::io::stdout().as_raw_handle();
+        if handle.is_null() {
+            return false;
+        }
+        let overlapped: &mut [u64; 4] = Box::leak(Box::new([0; 4]));
+        let written: &mut u32 = Box::leak(Box::new(0));
+        // SAFETY: a zero-length write sends no data; `overlapped` and `written` are valid,
+        // zero-initialised and never freed.
+        let ok = unsafe {
+            WriteFile(
+                handle.cast(),
+                std::ptr::null(),
+                0,
+                written,
+                overlapped.as_mut_ptr().cast(),
+            )
+        };
+        ok == 0
+            && matches!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(ERROR_BROKEN_PIPE | ERROR_NO_DATA)
+            )
+    }
+}
+
 /// Print `<util>: <prefix><msg>` to stderr, used by [`crate::show!`] and friends.
 ///
 /// stderr is unbuffered, so the line is formatted first and written at once.
 #[doc(hidden)]
 pub fn print_diagnostic(prefix: &str, msg: std::fmt::Arguments<'_>) {
+    exit_if_stdout_pipe_closed();
     let line = format!("{}: {prefix}{msg}\n", crate::util_name());
     let _ = std::io::stderr().write_all(line.as_bytes());
 }

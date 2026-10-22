@@ -33,8 +33,11 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     match exec(&buffer) {
         Ok(()) => Ok(()),
         // On Windows and WASI, silently handle broken pipe since there's no SIGPIPE
-        #[cfg(any(windows, target_os = "wasi"))]
+        #[cfg(target_os = "wasi")]
         Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        // Skua patch: on Windows exit as a SIGPIPE death is reported (141), like `seq`.
+        #[cfg(windows)]
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => std::process::exit(141),
         Err(err) => Err(USimpleError::new(
             1,
             translate!("yes-error-standard-output", "error" => strip_errno(&err)),

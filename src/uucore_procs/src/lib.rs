@@ -52,6 +52,11 @@ pub fn main(args: TokenStream, stream: TokenStream) -> TokenStream {
             #[cfg(all(#signals, unix))]
             uucore::disable_rust_signal_handlers().expect("Disabling rust signal handlers failed");
             let result = uumain(args);
+            // A failure after the reader of stdout went away is a SIGPIPE death on Unix:
+            // exit 141 without a message (Skua patch).
+            if result.is_err() || uucore::error::get_exit_code() != 0 {
+                uucore::error::exit_if_stdout_pipe_closed();
+            }
             match result {
                 Ok(()) => uucore::error::get_exit_code(),
                 Err(e) => {

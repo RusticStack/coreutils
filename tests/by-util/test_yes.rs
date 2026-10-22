@@ -18,7 +18,11 @@ fn run(args: &[impl AsRef<OsStr>], expected: &[u8]) {
     #[cfg(all(unix, not(wasi_runner)))]
     result.signal_name_is("PIPE");
 
-    #[cfg(any(not(unix), wasi_runner))]
+    // Skua patch: on Windows yes exits 141, as bash reports a SIGPIPE death.
+    #[cfg(windows)]
+    result.code_is(141);
+
+    #[cfg(any(all(not(unix), not(windows)), wasi_runner))]
     result.success();
 }
 

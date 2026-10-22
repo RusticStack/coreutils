@@ -991,7 +991,7 @@ pub fn flush_output<W: Write>(output: &mut W) -> UResult<()> {
     match output.flush() {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => {
-            std::process::exit(13);
+            std::process::exit(141); // Skua patch: 141, as bash reports a SIGPIPE death
         }
         Err(err) => Err(err.map_err_context(|| translate!("tr-error-write-error"))),
     }
