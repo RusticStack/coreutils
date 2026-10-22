@@ -50,9 +50,13 @@ mod test_chcon;
 #[path = "by-util/test_chgrp.rs"]
 mod test_chgrp;
 
-#[cfg(feature = "chmod")]
+#[cfg(all(feature = "chmod", unix))]
 #[path = "by-util/test_chmod.rs"]
 mod test_chmod;
+
+#[cfg(all(feature = "chmod", windows))]
+#[path = "by-util/test_chmod_windows.rs"]
+mod test_chmod_windows;
 
 #[cfg(feature = "chown")]
 #[path = "by-util/test_chown.rs"]
@@ -342,9 +346,13 @@ mod test_sort;
 #[path = "by-util/test_split.rs"]
 mod test_split;
 
-#[cfg(feature = "stat")]
+#[cfg(all(feature = "stat", unix))]
 #[path = "by-util/test_stat.rs"]
 mod test_stat;
+
+#[cfg(all(feature = "stat", windows))]
+#[path = "by-util/test_stat_windows.rs"]
+mod test_stat_windows;
 
 #[cfg(feature = "stdbuf")]
 #[path = "by-util/test_stdbuf.rs"]

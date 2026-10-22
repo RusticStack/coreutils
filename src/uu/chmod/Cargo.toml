@@ -12,7 +12,7 @@ rust-version.workspace = true
 readme.workspace = true
 
 [lib]
-path = "src/chmod.rs"
+path = "src/lib.rs"
 doctest = false
 
 [target.'cfg(unix)'.dependencies]
@@ -20,6 +20,11 @@ clap = { workspace = true }
 fluent = { workspace = true }
 thiserror = { workspace = true }
 uucore = { workspace = true, features = ["fs", "mode", "perms"] }
+
+[target.'cfg(windows)'.dependencies]
+clap = { workspace = true }
+fluent = { workspace = true }
+uucore = { workspace = true }
 
 [features]
 diagnostics = ["uucore/diagnostics"]
