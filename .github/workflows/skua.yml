@@ -42,6 +42,25 @@ jobs:
       - name: Test coreutils (tests/by-util for every util Skua ships)
         # Upstream's Windows test recipe (CICD.yml build_rust_stable) with Skua's feature set:
         # feat_os_windows + stat + chmod, so test_ls, test_stat_windows and test_chmod_windows run.
-        run: cargo nextest run --hide-progress-bar --profile ci --locked --features windows,stat,chmod
+        # Exactly 8 tests are excluded (the rest of the suite still runs):
+        shell: bash
+        env:
+          # Windows chmod parses its own options and returns an unlocalized/uncoloured UUsageError
+          # (8da1f887a); Skua Bash is English-only.
+          SKIP_CHMOD_L10N: >-
+            binary_id(coreutils::test_localization_and_colors) & (
+            test(=test_error_messages_have_colors) |
+            test(=test_error_messages_french_translation) |
+            test(=test_help_messages_french_translation) |
+            test(=test_french_colored_error_messages))
+          # chmod is a checked no-op on Windows (Skua M3-SH5, commit 8da1f887a): permission-dependent
+          # tests can't hold.
+          SKIP_CHMOD_PERMS: >-
+            binary_id(coreutils::tests) & (
+            test(=test_ls::test_ls_io_errors) |
+            test(=test_rm::test_prompt_write_protected_yes) |
+            test(=test_rm::test_prompt_write_protected_no) |
+            test(=test_rm::test_prompts))
+        run: cargo nextest run --hide-progress-bar --profile ci --locked --features windows,stat,chmod -E "not ((${SKIP_CHMOD_L10N}) | (${SKIP_CHMOD_PERMS}))"
       - name: Test uucore and the crates Skua changed (unit tests)
         run: cargo nextest run --hide-progress-bar --profile ci --locked -p uucore -p uu_ls -p uu_stat -p uu_chmod -p uu_cat -p uu_tail -p uu_tr -p uu_yes --no-tests=warn
