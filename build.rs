@@ -20,9 +20,14 @@ pub fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     // Check for tldr.zip when building uudoc to warn users once at build time
-    // instead of repeatedly at runtime for each utility
-    println!("cargo:rerun-if-changed=docs/tldr.zip");
-    if env::var("CARGO_FEATURE_UUDOC").is_ok() && !Path::new("docs/tldr.zip").exists() {
+    // instead of repeatedly at runtime for each utility.
+    // Skua: only uudoc reads the archive; watching a file that is missing makes cargo rebuild
+    // the coreutils crate on every build.
+    let uudoc = env::var("CARGO_FEATURE_UUDOC").is_ok();
+    if uudoc {
+        println!("cargo:rerun-if-changed=docs/tldr.zip");
+    }
+    if uudoc && !Path::new("docs/tldr.zip").exists() {
         println!(
             "cargo:warning=No tldr archive found, so the documentation will not include examples."
         );
