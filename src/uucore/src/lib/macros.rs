@@ -87,6 +87,7 @@ pub static UTILITY_IS_SECOND_ARG: AtomicBool = AtomicBool::new(false);
 #[macro_export]
 macro_rules! show(
     ($err:expr) => ({
+        $crate::error::exit_if_stdout_pipe_closed();
         #[allow(unused_imports)]
         use $crate::error::UError;
         use std::io::Write as _;
@@ -153,6 +154,7 @@ macro_rules! show_if_err(
 #[macro_export]
 macro_rules! show_error(
     ($($args:tt)+) => ({
+        $crate::error::exit_if_stdout_pipe_closed();
 		use std::io::Write as _;
         let _ = writeln!(
             std::io::stderr(),
@@ -181,6 +183,7 @@ macro_rules! show_error(
 #[macro_export]
 macro_rules! show_warning(
     ($($args:tt)+) => ({
+        $crate::error::exit_if_stdout_pipe_closed();
 		use std::io::Write as _;
         let _ = writeln!(
             std::io::stderr(),
@@ -195,6 +198,7 @@ macro_rules! show_warning(
 #[macro_export]
 macro_rules! show_warning_caps(
     ($($args:tt)+) => ({
+        $crate::error::exit_if_stdout_pipe_closed();
 		use std::io::Write as _;
         let _ = writeln!(
             std::io::stderr(),
