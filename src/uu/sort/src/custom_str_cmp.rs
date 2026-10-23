@@ -62,3 +62,24 @@ pub fn custom_str_cmp(
         }
     }
 }
+
+/// Skua: the key GNU `sort -f`/`-d`/`-i` collates in a locale (Git Bash): the bytes
+/// [`custom_str_cmp`] keeps, upper-cased when `ignore_case`.
+#[cfg(windows)]
+pub fn custom_str_key(
+    s: &[u8],
+    ignore_non_printing: bool,
+    ignore_non_dictionary: bool,
+    ignore_case: bool,
+) -> Vec<u8> {
+    s.iter()
+        .filter(|&&c| filter_char(c, ignore_non_printing, ignore_non_dictionary))
+        .map(|&c| {
+            if ignore_case {
+                c.to_ascii_uppercase()
+            } else {
+                c
+            }
+        })
+        .collect()
+}

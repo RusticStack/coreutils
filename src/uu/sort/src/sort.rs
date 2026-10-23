@@ -472,6 +472,13 @@ impl GlobalSettings {
         let [selector] = &self.selectors[..] else {
             return false;
         };
+        // Skua: in a UTF-8 locale on Windows `-f` collates (see `compare_by`), as in Git Bash.
+        #[cfg(windows)]
+        if i18n::get_locale_encoding() == i18n::UEncoding::Utf8
+            && i18n::collator::should_use_locale_collation()
+        {
+            return false;
+        }
         self.mode == SortMode::Default
             && self.ignore_case
             && !self.dictionary_order
@@ -2832,12 +2839,28 @@ pub fn merge_compare<'a>(
 #[cfg(feature = "i18n-collator")]
 #[inline(never)]
 fn compare_lines_with_collator(a: &Line<'_>, b: &Line<'_>, settings: &GlobalSettings) -> Ordering {
-    let mut cmp = locale_cmp(a.line, b.line);
-    if cmp == Ordering::Equal {
+    let cmp = locale_cmp(a.line, b.line);
+    // Skua: on Windows lines the locale finds equal stay equal (see `windows_tie`).
+    #[cfg(not(windows))]
+    let cmp = if cmp == Ordering::Equal {
         // Equal keys for inputs like `01` and `0_1`; fall back to (reversed) byte order.
-        cmp = b.line.cmp(a.line);
-    }
+        b.line.cmp(a.line)
+    } else {
+        cmp
+    };
     if settings.reverse { cmp.reverse() } else { cmp }
+}
+
+/// Skua: how lines the locale collates as equal (`ß` and `ss`, `-x` never) are ordered on
+/// Windows. Git Bash's GNU sort has no byte tie-break for whole lines (`memcoll` only), and its
+/// merge sort is stable, so they keep their input order; `-u` and `-s` see them as equal.
+#[cfg(windows)]
+fn windows_tie(a: &Line<'_>, b: &Line<'_>, settings: &GlobalSettings) -> Ordering {
+    if settings.stable || settings.unique {
+        Ordering::Equal
+    } else {
+        a.index.cmp(&b.index)
+    }
 }
 
 fn compare_by<'a>(
@@ -2861,6 +2884,10 @@ fn compare_by<'a>(
         let a_key = a_line_data.collation_key(a.index);
         let b_key = b_line_data.collation_key(b.index);
         let mut cmp = a_key.cmp(b_key);
+        #[cfg(windows)]
+        if cmp == Ordering::Equal {
+            return windows_tie(a, b, global_settings);
+        }
         // If collation keys are equal, fall back to lexicographic comparison
         // This can be the case for inputs like `01` and `0_1`, which have equal keys
         if cmp == Ordering::Equal {
@@ -2970,7 +2997,31 @@ fn compare_by<'a>(
                 // Use locale-aware comparison if feature is enabled and no custom flags are set
                 #[cfg(feature = "i18n-collator")]
                 {
-                    if settings.ignore_case
+                    // Skua: in a locale Git Bash collates the -f/-d/-i key (GNU sort).
+                    #[cfg(windows)]
+                    let collate_custom = i18n::collator::collator_is_active();
+                    #[cfg(not(windows))]
+                    let collate_custom = false;
+                    if collate_custom
+                        && (settings.ignore_case
+                            || settings.dictionary_order
+                            || settings.ignore_non_printing)
+                    {
+                        #[cfg(windows)]
+                        {
+                            let key = |s| {
+                                custom_str_cmp::custom_str_key(
+                                    s,
+                                    settings.ignore_non_printing,
+                                    settings.dictionary_order,
+                                    settings.ignore_case,
+                                )
+                            };
+                            locale_cmp(&key(a_str), &key(b_str))
+                        }
+                        #[cfg(not(windows))]
+                        Ordering::Equal
+                    } else if settings.ignore_case
                         || settings.dictionary_order
                         || settings.ignore_non_printing
                     {
@@ -3003,10 +3054,24 @@ fn compare_by<'a>(
     }
 
     // Call "last resort compare" if all selectors returned Equal
-    let cmp = if global_settings.mode == SortMode::Random
+    let random_stable_unique = global_settings.mode == SortMode::Random
         || global_settings.stable
-        || global_settings.unique
-    {
+        || global_settings.unique;
+    // Skua: in a locale Git Bash's last resort is the locale's order of the whole lines, then
+    // input order (GNU `xmemcoll0`, stable merge sort).
+    #[cfg(all(windows, feature = "i18n-collator"))]
+    if !random_stable_unique && i18n::collator::collator_is_active() {
+        let cmp = locale_cmp(a.line, b.line);
+        if cmp == Ordering::Equal {
+            return windows_tie(a, b, global_settings);
+        }
+        return if global_settings.reverse {
+            cmp.reverse()
+        } else {
+            cmp
+        };
+    }
+    let cmp = if random_stable_unique {
         Ordering::Equal
     } else {
         a.line.cmp(b.line)
