@@ -62,6 +62,12 @@ pub fn get_locale_from_env(locale_name: &str) -> (Locale, UEncoding) {
         }
     }
 
+    // Skua: with no LC_ALL/LC_*/LANG, Windows uses the POSIX locale too, not the user's Windows
+    // language: Git Bash (Cygwin's default C.UTF-8) sorts `.a B Z _c a b` in byte order, and
+    // scripts expect it. UTF-8, as Cygwin's default.
+    #[cfg(windows)]
+    return (DEFAULT_LOCALE, UEncoding::Utf8);
+    #[cfg(not(windows))]
     get_locale_from_os()
 }
 
