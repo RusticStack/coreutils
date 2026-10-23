@@ -474,7 +474,9 @@ impl Display for UIoError {
         use std::io::ErrorKind::*;
 
         let message;
-        let message = if self.inner.raw_os_error().is_some() {
+        let message = if let Some(gnu) = windows_gnu_message(&self.inner) {
+            gnu
+        } else if self.inner.raw_os_error().is_some() {
             // These are errors that come directly from the OS.
             // We want to normalize their messages across systems,
             // and we want to strip the "(os error X)" suffix.
@@ -522,6 +524,50 @@ impl Display for UIoError {
     }
 }
 
+/// Skua: on Windows, the GNU (`strerror`, as Git Bash's tools print it) text for the Windows
+/// error codes that file tools hit, instead of Windows' own message in the user's UI language
+/// (`O sistema não conseguiu localizar o ficheiro especificado.`). The codes map to errno as
+/// Cygwin's `errmap` does. `None` (other codes, other platforms) keeps the OS message.
+#[cfg(windows)]
+pub fn windows_gnu_message(err: &std::io::Error) -> Option<&'static str> {
+    Some(match err.raw_os_error()? {
+        // ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_INVALID_DRIVE, ERROR_INVALID_NAME,
+        // ERROR_BAD_PATHNAME: ENOENT
+        2 | 3 | 15 | 123 | 161 => "No such file or directory",
+        // ERROR_ACCESS_DENIED: EACCES
+        5 => "Permission denied",
+        // ERROR_INVALID_HANDLE: EBADF
+        6 => "Bad file descriptor",
+        // ERROR_NOT_SAME_DEVICE: EXDEV
+        17 => "Invalid cross-device link",
+        // ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION: EBUSY
+        32 | 33 => "Device or resource busy",
+        // ERROR_FILE_EXISTS, ERROR_ALREADY_EXISTS: EEXIST
+        80 | 183 => "File exists",
+        // ERROR_INVALID_PARAMETER: EINVAL
+        87 => "Invalid argument",
+        // ERROR_BROKEN_PIPE, ERROR_NO_DATA: EPIPE
+        109 | 232 => "Broken pipe",
+        // ERROR_DISK_FULL: ENOSPC
+        112 => "No space left on device",
+        // ERROR_DIR_NOT_EMPTY: ENOTEMPTY
+        145 => "Directory not empty",
+        // ERROR_FILENAME_EXCED_RANGE: ENAMETOOLONG
+        206 => "File name too long",
+        // ERROR_DIRECTORY: ENOTDIR
+        267 => "Not a directory",
+        // ERROR_PRIVILEGE_NOT_HELD: EPERM
+        1314 => "Operation not permitted",
+        _ => return None,
+    })
+}
+
+/// Skua: see the Windows version; other platforms keep the OS message.
+#[cfg(not(windows))]
+pub fn windows_gnu_message(_err: &std::io::Error) -> Option<&'static str> {
+    None
+}
+
 /// Strip the trailing " (os error XX)" from io error strings.
 ///
 /// Rust renders OS errors as `"No such file or directory (os error 2)"`, while GNU
@@ -545,6 +591,9 @@ impl Display for UIoError {
 /// assert_eq!(strip_errno(&err), "custom failure");
 /// ```
 pub fn strip_errno(err: &std::io::Error) -> String {
+    if let Some(gnu) = windows_gnu_message(err) {
+        return gnu.to_owned();
+    }
     let mut msg = err.to_string();
     if let Some(pos) = msg.find(" (os error ") {
         msg.truncate(pos);
@@ -903,6 +952,29 @@ impl Display for ClapErrorWrapper {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn test_windows_os_errors_use_gnu_text() {
+        use super::{FromIo, strip_errno};
+        use std::io::Error;
+        for (code, text) in [
+            (2, "No such file or directory"),
+            (3, "No such file or directory"),
+            (5, "Permission denied"),
+            (80, "File exists"),
+            (183, "File exists"),
+            (145, "Directory not empty"),
+            (267, "Not a directory"),
+        ] {
+            assert_eq!(strip_errno(&Error::from_raw_os_error(code)), text);
+            let err = Error::from_raw_os_error(code).map_err_context(|| "x".to_owned());
+            assert_eq!(err.to_string(), format!("x: {text}"));
+        }
+        // Other codes keep Windows' message, without the "(os error N)" suffix.
+        let other = strip_errno(&Error::from_raw_os_error(1450));
+        assert!(!other.is_empty() && !other.contains("(os error"));
+    }
+
     use super::{USimpleError, UUsageError, quiet_if_reported};
 
     /// A quieted error keeps its code but says nothing: the report already did.
