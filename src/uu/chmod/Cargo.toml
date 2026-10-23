@@ -24,7 +24,7 @@ uucore = { workspace = true, features = ["fs", "mode", "perms"] }
 [target.'cfg(windows)'.dependencies]
 clap = { workspace = true }
 fluent = { workspace = true }
-uucore = { workspace = true }
+uucore = { workspace = true, features = ["fs", "mode"] }
 
 [features]
 diagnostics = ["uucore/diagnostics"]

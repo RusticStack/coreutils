@@ -70,7 +70,8 @@ pub mod version_cmp;
 
 // * (platform-specific) feature-gated modules
 // ** non-windows (i.e. Unix + Fuchsia)
-#[cfg(all(not(windows), feature = "mode"))]
+// Skua: also on Windows, for chmod (Git Bash modes).
+#[cfg(feature = "mode")]
 pub mod mode;
 
 // ** unix-only

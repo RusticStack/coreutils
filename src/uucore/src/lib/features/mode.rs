@@ -11,9 +11,6 @@ use std::ffi::OsString;
 use std::fmt::{self, Display};
 use std::ops::Range;
 
-#[cfg(windows)]
-use libc::umask;
-
 use crate::quoting_style::escape_control_chars;
 use crate::translate;
 
@@ -434,13 +431,11 @@ pub fn get_umask() -> u32 {
         mask.bits() as u32
     }
 
+    // Skua: Windows has no umask a program can read (the CRT's is always 0); Git Bash's
+    // default is 022.
     #[cfg(windows)]
     {
-        // SAFETY: umask always succeeds and doesn't operate on memory. Races are
-        // possible but it can't violate Rust's guarantees.
-        let mask = unsafe { umask(0) };
-        unsafe { umask(mask) };
-        mask as u32
+        0o022
     }
 
     // WASI has no umask; return a typical default (022).

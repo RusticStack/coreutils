@@ -120,9 +120,23 @@ fn show_permission_denied_error(path: &Path) -> bool {
     true
 }
 
+/// `fs::remove_dir`, but on Windows a directory with the read-only attribute (`chmod -w dir`,
+/// Skua) loses it first, as Git Bash's rm (Cygwin) does: Windows refuses to remove it otherwise.
+fn remove_dir_clearing_read_only(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    if let Ok(md) = fs::symlink_metadata(path) {
+        let mut perms = md.permissions();
+        if md.is_dir() && perms.readonly() {
+            perms.set_readonly(false);
+            fs::set_permissions(path, perms)?;
+        }
+    }
+    fs::remove_dir(path)
+}
+
 /// Helper function to remove a directory and handle results
 fn remove_dir_with_feedback(path: &Path, options: &Options) -> bool {
-    match fs::remove_dir(path) {
+    match remove_dir_clearing_read_only(path) {
         Ok(_) => {
             report_verbose_write_error(verbose_removed_directory(path, options));
             false
@@ -737,7 +751,7 @@ fn remove_dir_recursive(
         }
 
         // Try removing the directory itself.
-        match fs::remove_dir(path) {
+        match remove_dir_clearing_read_only(path) {
             Err(_) if !error && !is_readable(path) => {
                 // For compatibility with GNU test case
                 // `tests/rm/unread2.sh`, show "Permission denied" in this

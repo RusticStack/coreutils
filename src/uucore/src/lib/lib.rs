@@ -107,7 +107,8 @@ pub use crate::features::version_cmp;
 
 // * (platform-specific) feature-gated modules
 // ** non-windows (i.e. Unix + Fuchsia)
-#[cfg(all(not(windows), feature = "mode"))]
+// Skua: also on Windows, for chmod (Git Bash modes).
+#[cfg(feature = "mode")]
 pub use crate::features::mode;
 // ** unix-only
 #[cfg(all(unix, feature = "entries"))]
@@ -438,6 +439,9 @@ static EXECUTION_PHRASE: LazyLock<String> = LazyLock::new(|| {
             .map(|os_str| os_str.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join(" ")
+    } else if cfg!(windows) {
+        // Skua: Windows passes the full path as argv[0]; Git Bash says `Try 'chmod --help'`.
+        util_name().to_owned()
     } else {
         ARGV[0].to_string_lossy().into_owned()
     }
