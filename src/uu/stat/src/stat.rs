@@ -17,7 +17,7 @@ use uucore::display::Quotable;
 #[cfg(unix)]
 use uucore::entries;
 use uucore::error::strip_errno;
-use uucore::fs::display_permissions;
+use uucore::fs::display_permissions_unix;
 #[cfg(unix)]
 use uucore::fs::{major, minor};
 #[cfg(unix)]
@@ -45,9 +45,13 @@ use uucore::time::{FormatSystemTimeFallback, format_system_time, system_time_to_
 mod windows;
 #[cfg(windows)]
 use windows::{
-    FileTypeExt, FsMeta, MetadataExt, StatFs, entries, major, minor, mode_t, pretty_filetype,
+    FileTypeExt, FsMeta, Meta, MetadataExt, StatFs, entries, major, minor, mode_t, pretty_filetype,
     statfs,
 };
+
+/// The metadata `stat` formats: `std`'s on Unix, the Git Bash view on Windows (Skua).
+#[cfg(unix)]
+type Meta = Metadata;
 
 #[derive(Debug, thiserror::Error)]
 enum StatError {
@@ -59,7 +63,9 @@ enum StatError {
     StdinFilesystemMode,
     #[error("{}", translate!("stat-error-cannot-read-filesystem-info", "file" => file, "error" => error))]
     CannotReadFilesystemInfo { file: String, error: String },
-    #[error("{}", translate!("stat-error-cannot-statx", "file" => file, "error" => error))]
+    // Skua: Git Bash's stat (no statx on Windows) says `cannot stat`.
+    #[cfg_attr(not(windows), error("{}", translate!("stat-error-cannot-statx", "file" => file, "error" => error)))]
+    #[cfg_attr(windows, error("{}", translate!("stat-error-cannot-stat", "file" => file, "error" => error)))]
     CannotStatx { file: String, error: String },
 }
 
@@ -1166,7 +1172,7 @@ impl Stater {
     fn process_token_files(
         &self,
         t: &Token,
-        meta: &Metadata,
+        meta: &Meta,
         display_name: &str,
         file: &OsString,
         file_type: FileType,
@@ -1191,14 +1197,17 @@ impl Stater {
                     // access rights in octal
                     'a' => OutputType::UnsignedOct(0o7777 & meta.mode()),
                     // access rights in human readable form
-                    'A' => OutputType::Str(display_permissions(meta, true)),
+                    'A' => OutputType::Str(display_permissions_unix(meta.mode(), true)),
                     // number of blocks allocated (see %B)
                     'b' => OutputType::Unsigned(meta.blocks()),
 
                     // the size in bytes of each block reported by %b
                     // FIXME: blocksize differs on various platform
                     // See coreutils/gnulib/lib/stat-size.h ST_NBLOCKSIZE // spell-checker:disable-line
+                    #[cfg(unix)]
                     'B' => OutputType::Unsigned(512),
+                    #[cfg(windows)]
+                    'B' => OutputType::Unsigned(windows::BLOCK_UNIT),
                     // SELinux security context string
                     'C' => {
                         #[cfg(all(
@@ -1317,11 +1326,11 @@ impl Stater {
                         OutputType::Timestamp(sec, nsec)
                     }
                     // time of last status change, human-readable
-                    'z' => OutputType::Str(pretty_time(meta, MetadataTimeField::Change)),
+                    'z' => OutputType::Str(pretty_system_time(change_time(meta))),
                     // time of last status change, seconds since Epoch
                     'Z' => {
-                        let (sec, nsec) = metadata_get_time(meta, MetadataTimeField::Change)
-                            .map_or((0, 0), system_time_to_timestamp);
+                        let (sec, nsec) =
+                            change_time(meta).map_or((0, 0), system_time_to_timestamp);
                         OutputType::Timestamp(sec, nsec)
                     }
                     'R' => OutputType::UnsignedHex(meta.rdev()),
@@ -1398,6 +1407,8 @@ impl Stater {
             };
             match result {
                 Ok(meta) => {
+                    #[cfg(windows)]
+                    let meta = Meta::new(meta, Path::new(&file), follow_symbolic_links);
                     let file_type = meta.file_type();
                     let tokens = if self.from_user
                         || !(file_type.is_char_device() || file_type.is_block_device())
@@ -1468,7 +1479,7 @@ impl Stater {
         } else {
             let device_line = if show_dev_type {
                 format!(
-                    "{}: %Hd,%Ld\t{}: %-10i  {}: %-5h {} {}: %t,%T\n",
+                    "{}: {DEVICE_FORMAT}\t{}: %-10i  {}: %-5h {} {}: %t,%T\n",
                     translate!("stat-word-device"),
                     translate!("stat-word-inode"),
                     translate!("stat-word-links"),
@@ -1477,7 +1488,7 @@ impl Stater {
                 )
             } else {
                 format!(
-                    "{}: %Hd,%Ld\t{}: %-10i  {}: %h\n",
+                    "{}: {DEVICE_FORMAT}\t{}: %-10i  {}: %h\n",
                     translate!("stat-word-device"),
                     translate!("stat-word-inode"),
                     translate!("stat-word-links")
@@ -1577,8 +1588,30 @@ pub fn uu_app() -> Command {
 
 const PRETTY_DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S.%N %z";
 
+/// The device in the default output: `major,minor`; on Windows (Skua) Git Bash's
+/// `<hex>h/<decimal>d` of the volume serial number.
+#[cfg(not(windows))]
+const DEVICE_FORMAT: &str = "%Hd,%Ld";
+#[cfg(windows)]
+const DEVICE_FORMAT: &str = "%Dh/%dd";
+
+/// The change time: from the metadata on Unix, `FILE_BASIC_INFO` on Windows (Skua).
+#[cfg(unix)]
+fn change_time(meta: &Meta) -> Option<SystemTime> {
+    metadata_get_time(meta, MetadataTimeField::Change)
+}
+
+#[cfg(windows)]
+fn change_time(meta: &Meta) -> Option<SystemTime> {
+    meta.change_time()
+}
+
 fn pretty_time(meta: &Metadata, md_time_field: MetadataTimeField) -> String {
-    if let Some(time) = metadata_get_time(meta, md_time_field) {
+    pretty_system_time(metadata_get_time(meta, md_time_field))
+}
+
+fn pretty_system_time(time: Option<SystemTime>) -> String {
+    if let Some(time) = time {
         let mut tmp = Vec::new();
         if format_system_time(
             &mut tmp,

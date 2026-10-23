@@ -5,15 +5,22 @@
 
 //! Windows stand-ins for the Unix-only APIs `stat` uses (Skua patch).
 //!
-//! File mode: the type bits plus `0o777`, or `0o555` for a read-only file, which is what
-//! `uucore::fs::display_permissions` shows on Windows. `%s %n %N %F %Y %y %X %x %W %w %a %A %f`
-//! and the other time and size directives are real. There are no owners, devices, inodes or link
-//! counts: `%u %g` print 0, `%U %G` print `UNKNOWN`, `%d %i %t %T %r` print 0, `%h` prints 1.
-//! `stat -f` reports that file system information is not available.
+//! Files: [`Meta`] wraps the `std` metadata with what Git Bash's `stat` reports on a `noacl`
+//! mount (Cygwin), from `uucore::fs::msys`: the mode `ls -l` shows (`0644`, `0755` for
+//! directories and executables, minus `0222` for a read-only file), the current user as the
+//! owner and the user's primary group as the group (`%U` the user name, `%G` `UNKNOWN`, as in
+//! Git Bash), the volume serial number as the device, the file index as the inode, the hard
+//! link count, the change time, 1024-byte blocks and a 64 KiB I/O block. Character and block
+//! devices do not exist. `stat -f` reports that file system information is not available.
 
 // spell-checker:ignore IFMT IFREG IFDIR IFLNK
 
 use std::fs::{FileType, Metadata};
+use std::ops::Deref;
+use std::path::Path;
+use std::time::SystemTime;
+
+use uucore::fs::msys;
 
 /// `mode_t` on Windows: the same width as on Linux.
 #[allow(non_camel_case_types)]
@@ -23,6 +30,43 @@ const S_IFMT: u32 = 0o170_000;
 const S_IFREG: u32 = 0o100_000;
 const S_IFDIR: u32 = 0o040_000;
 const S_IFLNK: u32 = 0o120_000;
+
+/// The unit of `%b` (`%B`): Cygwin's `st_blocks` counts 1024-byte blocks.
+pub const BLOCK_UNIT: u64 = 1024;
+
+/// A file's metadata with the Git Bash view of it (see the module docs).
+pub struct Meta {
+    inner: Metadata,
+    mode: u32,
+    ids: Option<msys::FileIds>,
+    blocks: u64,
+}
+
+impl Meta {
+    pub fn new(meta: Metadata, path: &Path, follow: bool) -> Self {
+        let mode = msys::mode(&meta, path);
+        let ids = msys::file_ids(path, follow);
+        let blocks = msys::allocated_bytes(&meta, path) / BLOCK_UNIT;
+        Self {
+            inner: meta,
+            mode,
+            ids,
+            blocks,
+        }
+    }
+
+    /// The change time (`%z`, `%Z`); `None` if it could not be read.
+    pub fn change_time(&self) -> Option<SystemTime> {
+        self.ids.and_then(|ids| ids.ctime)
+    }
+}
+
+impl Deref for Meta {
+    type Target = Metadata;
+    fn deref(&self) -> &Metadata {
+        &self.inner
+    }
+}
 
 /// The subset of `std::os::unix::fs::MetadataExt` that `stat` reads.
 pub trait MetadataExt {
@@ -37,45 +81,33 @@ pub trait MetadataExt {
     fn blksize(&self) -> u64;
 }
 
-impl MetadataExt for Metadata {
+impl MetadataExt for Meta {
     fn dev(&self) -> u64 {
-        0
+        self.ids.map_or(0, |ids| ids.dev)
     }
     fn ino(&self) -> u64 {
-        0
+        self.ids.map_or(0, |ids| ids.ino)
     }
     fn mode(&self) -> u32 {
-        let file_type = if self.file_type().is_symlink() {
-            S_IFLNK
-        } else if self.is_dir() {
-            S_IFDIR
-        } else {
-            S_IFREG
-        };
-        let perms = if self.permissions().readonly() {
-            0o555
-        } else {
-            0o777
-        };
-        file_type | perms
+        self.mode
     }
     fn nlink(&self) -> u64 {
-        1
+        self.ids.map_or(1, |ids| ids.nlink)
     }
     fn uid(&self) -> u32 {
-        0
+        msys::owner().uid.parse().unwrap_or(0)
     }
     fn gid(&self) -> u32 {
-        0
+        msys::owner().gid.parse().unwrap_or(0)
     }
     fn rdev(&self) -> u64 {
         0
     }
     fn blocks(&self) -> u64 {
-        self.len().div_ceil(512)
+        self.blocks
     }
     fn blksize(&self) -> u64 {
-        4096
+        65536
     }
 }
 
@@ -113,10 +145,18 @@ pub fn pretty_filetype(mode: mode_t, size: u64) -> String {
     .to_owned()
 }
 
-/// User and group names: Windows files have no numeric owner.
+/// User and group names as Git Bash shows them: the current user's name for its uid; no group
+/// name (Git Bash prints `UNKNOWN` for the primary group).
 pub mod entries {
-    pub fn uid2usr(_id: u32) -> Result<String, ()> {
-        Err(())
+    use uucore::fs::msys;
+
+    pub fn uid2usr(id: u32) -> Result<String, ()> {
+        let owner = msys::owner();
+        if owner.uid == id.to_string() {
+            Ok(owner.user.clone())
+        } else {
+            Err(())
+        }
     }
     pub fn gid2grp(_id: u32) -> Result<String, ()> {
         Err(())

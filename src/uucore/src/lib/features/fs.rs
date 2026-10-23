@@ -556,6 +556,69 @@ pub mod msys {
         (ok != 0).then_some(info)
     }
 
+    /// What Git Bash's `stat` reports beyond [`mode`] and [`owner`]: the volume serial number
+    /// as the device, the NTFS file index as the inode, the hard link count (1 for directories)
+    /// and the change time (`FILE_BASIC_INFO.ChangeTime`; `std` has none).
+    #[derive(Debug, Clone, Copy)]
+    pub struct FileIds {
+        pub dev: u64,
+        pub ino: u64,
+        pub nlink: u64,
+        pub ctime: Option<std::time::SystemTime>,
+    }
+
+    /// [`FileIds`] of `path`; of the link itself unless `follow`. `None` if it cannot be opened.
+    pub fn file_ids(path: &Path, follow: bool) -> Option<FileIds> {
+        // FILETIME: 100 ns units since 1601-01-01.
+        const EPOCH_DIFF: i64 = 116_444_736_000_000_000;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, FILE_BASIC_INFO, FILE_FLAG_BACKUP_SEMANTICS,
+            FILE_FLAG_OPEN_REPARSE_POINT, FileBasicInfo, GetFileInformationByHandle,
+        };
+        let mut flags = FILE_FLAG_BACKUP_SEMANTICS;
+        if !follow {
+            flags |= FILE_FLAG_OPEN_REPARSE_POINT;
+        }
+        let file = fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .custom_flags(flags)
+            .open(path)
+            .ok()?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: `info` is a BY_HANDLE_FILE_INFORMATION; the handle is open.
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &raw mut info) } == 0 {
+            return None;
+        }
+        let mut basic = FILE_BASIC_INFO::default();
+        // SAFETY: `basic` is a FILE_BASIC_INFO of the size passed.
+        let basic_ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileBasicInfo,
+                (&raw mut basic).cast(),
+                size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        } != 0;
+        let ctime = (basic_ok && basic.ChangeTime > EPOCH_DIFF).then(|| {
+            let ticks = (basic.ChangeTime - EPOCH_DIFF).unsigned_abs();
+            std::time::UNIX_EPOCH
+                + std::time::Duration::new(ticks / 10_000_000, (ticks % 10_000_000) as u32 * 100)
+        });
+        let is_dir = info.dwFileAttributes
+            & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY
+            != 0;
+        Some(FileIds {
+            dev: u64::from(info.dwVolumeSerialNumber),
+            ino: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+            nlink: if is_dir {
+                1
+            } else {
+                u64::from(info.nNumberOfLinks.max(1))
+            },
+            ctime,
+        })
+    }
+
     fn is_executable(path: &Path) -> bool {
         let by_name = path
             .extension()
