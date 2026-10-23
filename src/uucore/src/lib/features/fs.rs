@@ -458,6 +458,264 @@ pub fn display_permissions(metadata: &fs::Metadata, display_file_type: bool) -> 
     }
 }
 
+/// Skua: the permissions of a file as Git Bash's `ls -l` shows them on Windows (see
+/// [`msys::mode`]). Unlike [`display_permissions`] it needs the path, to look for `#!` or `MZ`.
+#[cfg(windows)]
+pub fn display_permissions_msys(
+    metadata: &fs::Metadata,
+    path: &Path,
+    display_file_type: bool,
+) -> String {
+    display_permissions_unix(msys::mode(metadata, path), display_file_type)
+}
+
+/// Skua: file modes and owners on Windows as Git Bash (MSYS2, Cygwin `noacl` mounts) reports
+/// them, so `ls -l` output reads the same in Skua Bash and Git Bash.
+#[cfg(windows)]
+pub mod msys {
+    use super::mode::{S_IFDIR, S_IFLNK, S_IFREG};
+    use std::ffi::OsString;
+    use std::fs;
+    use std::io::Read;
+    use std::os::windows::ffi::OsStringExt;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use std::path::Path;
+    use std::sync::OnceLock;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::Security::{
+        GetSidIdentifierAuthority, GetSidSubAuthority, GetSidSubAuthorityCount,
+        GetTokenInformation, LookupAccountSidW, PSID, SID_NAME_USE, TOKEN_PRIMARY_GROUP,
+        TOKEN_QUERY, TOKEN_USER, TokenPrimaryGroup, TokenUser,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_READ_ATTRIBUTES, FILE_STANDARD_INFO, FileStandardInfo, GetFileInformationByHandleEx,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows_sys::Win32::System::WindowsProgramming::GetComputerNameW;
+
+    /// The mode Cygwin gives a file on a `noacl` mount (Git for Windows mounts every drive so):
+    /// directories `0755` (the read-only attribute is ignored), symlinks `0777`, other files
+    /// `0644`, plus `0111` when the file is executable (a `.exe` or `.lnk` name, or contents
+    /// starting with `#!`, `MZ` or `:` + newline), minus `0222` with the read-only attribute.
+    /// The result includes the file type bits (`S_IFDIR`, `S_IFLNK`, `S_IFREG`).
+    pub fn mode(metadata: &fs::Metadata, path: &Path) -> u32 {
+        if metadata.is_symlink() {
+            return S_IFLNK | 0o777;
+        }
+        if metadata.is_dir() {
+            return S_IFDIR | 0o755;
+        }
+        let mut mode = S_IFREG | 0o644;
+        if metadata.permissions().readonly() {
+            mode &= !0o222;
+        }
+        if is_executable(path) {
+            mode |= 0o111;
+        }
+        mode
+    }
+
+    /// The bytes Windows allocated for a regular file, rounded up to Cygwin's 1024-byte
+    /// `st_blocks`, as Git Bash's `ls -s` and `ls -l` `total` count them; 0 for directories and
+    /// symlinks. Falls back to the file's length when it cannot be opened.
+    pub fn allocated_bytes(metadata: &fs::Metadata, path: &Path) -> u64 {
+        if !metadata.is_file() {
+            return 0;
+        }
+        let allocated = standard_info(path).map_or(metadata.len(), |info| {
+            u64::try_from(info.AllocationSize).unwrap_or(0)
+        });
+        allocated.div_ceil(1024) * 1024
+    }
+
+    /// The hard link count of a regular file (Git Bash's `ls -l` second column); 1 for
+    /// directories, symlinks and files that cannot be opened.
+    pub fn link_count(metadata: &fs::Metadata, path: &Path) -> u64 {
+        if !metadata.is_file() {
+            return 1;
+        }
+        standard_info(path).map_or(1, |info| u64::from(info.NumberOfLinks.max(1)))
+    }
+
+    fn standard_info(path: &Path) -> Option<FILE_STANDARD_INFO> {
+        let file = fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .open(path)
+            .ok()?;
+        let mut info = FILE_STANDARD_INFO::default();
+        // SAFETY: `info` is a FILE_STANDARD_INFO of the size passed.
+        let ok = unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileStandardInfo,
+                (&raw mut info).cast(),
+                size_of::<FILE_STANDARD_INFO>() as u32,
+            )
+        };
+        (ok != 0).then_some(info)
+    }
+
+    fn is_executable(path: &Path) -> bool {
+        let by_name = path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("exe") || ext.eq_ignore_ascii_case("lnk"));
+        if by_name {
+            return true;
+        }
+        let mut magic = [0u8; 2];
+        fs::File::open(path)
+            .and_then(|mut f| f.read_exact(&mut magic))
+            .is_ok_and(|()| matches!(&magic, b"#!" | b"MZ" | b":\n"))
+    }
+
+    /// The owner Git Bash shows for every file on a `noacl` mount: the current user, and the
+    /// user's primary group as a number (Git Bash prints `197121`, not a name).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Owner {
+        /// The account name (`ls -l`), or the uid when it cannot be looked up.
+        pub user: String,
+        /// The uid as a string (`ls -n`).
+        pub uid: String,
+        /// The gid as a string (`ls -l`, `ls -n`).
+        pub gid: String,
+    }
+
+    /// The current user and primary group, looked up once per process.
+    pub fn owner() -> &'static Owner {
+        static OWNER: OnceLock<Owner> = OnceLock::new();
+        OWNER.get_or_init(|| {
+            lookup_owner().unwrap_or_else(|| Owner {
+                user: "0".to_owned(),
+                uid: "0".to_owned(),
+                gid: "0".to_owned(),
+            })
+        })
+    }
+
+    struct Token(HANDLE);
+
+    impl Drop for Token {
+        fn drop(&mut self) {
+            // SAFETY: the handle came from OpenProcessToken and is closed once.
+            unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    fn token_info(token: &Token, class: i32) -> Option<Vec<u64>> {
+        let mut len = 0u32;
+        // SAFETY: a size query with a null buffer.
+        unsafe { GetTokenInformation(token.0, class, std::ptr::null_mut(), 0, &raw mut len) };
+        if len == 0 {
+            return None;
+        }
+        // u64 elements: the buffer holds SID pointers, so it must be pointer-aligned.
+        let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+        // SAFETY: `buf` has at least `len` bytes.
+        let ok = unsafe {
+            GetTokenInformation(token.0, class, buf.as_mut_ptr().cast(), len, &raw mut len)
+        };
+        (ok != 0).then_some(buf)
+    }
+
+    fn wide_to_string(buf: &[u16]) -> String {
+        OsString::from_wide(buf).to_string_lossy().into_owned()
+    }
+
+    /// Account name and domain of a SID.
+    fn account(sid: PSID) -> Option<(String, String)> {
+        let mut name = [0u16; 256];
+        let mut domain = [0u16; 256];
+        let (mut name_len, mut domain_len) = (256u32, 256u32);
+        let mut kind: SID_NAME_USE = 0;
+        // SAFETY: buffers and lengths match; `sid` is valid while its token buffer lives.
+        let ok = unsafe {
+            LookupAccountSidW(
+                std::ptr::null(),
+                sid,
+                name.as_mut_ptr(),
+                &raw mut name_len,
+                domain.as_mut_ptr(),
+                &raw mut domain_len,
+                &raw mut kind,
+            )
+        };
+        if ok == 0 {
+            return None;
+        }
+        Some((
+            wide_to_string(&name[..name_len as usize]),
+            wide_to_string(&domain[..domain_len as usize]),
+        ))
+    }
+
+    fn computer_name() -> Option<String> {
+        let mut buf = [0u16; 64];
+        let mut len = 64u32;
+        // SAFETY: `buf` has `len` elements.
+        let ok = unsafe { GetComputerNameW(buf.as_mut_ptr(), &raw mut len) };
+        (ok != 0).then(|| wide_to_string(&buf[..len as usize]))
+    }
+
+    /// The POSIX id Cygwin gives a SID: `S-1-5-21-<machine>-RID` (local accounts) is
+    /// `0x30000 + RID`, `S-1-5-21-<domain>-RID` is `0x100000 + RID`, `S-1-5-32-RID` (builtin)
+    /// and `S-1-5-RID` (NT AUTHORITY) are `RID`; anything else, its last sub-authority.
+    fn posix_id(sid: PSID, local: bool) -> u32 {
+        // SAFETY: `sid` is a valid SID; indexes stay below its sub-authority count.
+        unsafe {
+            let count = u32::from(*GetSidSubAuthorityCount(sid));
+            if count == 0 {
+                return 0;
+            }
+            let authority = (*GetSidIdentifierAuthority(sid)).Value;
+            let first = *GetSidSubAuthority(sid, 0);
+            let rid = *GetSidSubAuthority(sid, count - 1);
+            if authority == [0, 0, 0, 0, 0, 5] && first == 21 && count == 5 {
+                if local {
+                    0x3_0000 + rid
+                } else {
+                    0x10_0000 + rid
+                }
+            } else {
+                rid
+            }
+        }
+    }
+
+    fn lookup_owner() -> Option<Owner> {
+        let mut handle: HANDLE = std::ptr::null_mut();
+        // SAFETY: the pseudo handle of this process; `handle` receives the token.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut handle) } == 0 {
+            return None;
+        }
+        let token = Token(handle);
+        let computer = computer_name().unwrap_or_default();
+        let is_local = |domain: &str| !domain.is_empty() && domain.eq_ignore_ascii_case(&computer);
+
+        let user_buf = token_info(&token, TokenUser)?;
+        // SAFETY: GetTokenInformation(TokenUser) filled the buffer with a TOKEN_USER.
+        let user_sid = unsafe { (*user_buf.as_ptr().cast::<TOKEN_USER>()).User.Sid };
+        let (user_name, user_domain) = account(user_sid).unwrap_or_default();
+        let uid = posix_id(user_sid, is_local(&user_domain));
+
+        let group_buf = token_info(&token, TokenPrimaryGroup)?;
+        // SAFETY: GetTokenInformation(TokenPrimaryGroup) filled it with a TOKEN_PRIMARY_GROUP.
+        let group_sid = unsafe { (*group_buf.as_ptr().cast::<TOKEN_PRIMARY_GROUP>()).PrimaryGroup };
+        let group_domain = account(group_sid).map(|(_, d)| d).unwrap_or_default();
+        let gid = posix_id(group_sid, is_local(&group_domain));
+
+        Some(Owner {
+            user: if user_name.is_empty() {
+                uid.to_string()
+            } else {
+                user_name
+            },
+            uid: uid.to_string(),
+            gid: gid.to_string(),
+        })
+    }
+}
+
 /// Display the permissions of a file
 #[cfg(unix)]
 pub fn display_permissions(metadata: &fs::Metadata, display_file_type: bool) -> String {
@@ -1226,6 +1484,51 @@ mod tests {
     use std::os::unix;
     #[cfg(unix)]
     use tempfile::{NamedTempFile, tempdir};
+
+    #[cfg(windows)]
+    #[test]
+    fn test_msys_modes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = |name: &str, contents: &[u8]| {
+            let path = dir.path().join(name);
+            fs::write(&path, contents).unwrap();
+            path
+        };
+        let show = |path: &Path| {
+            display_permissions_msys(&fs::symlink_metadata(path).unwrap(), path, true)
+        };
+        assert_eq!(show(dir.path()), "drwxr-xr-x");
+        assert_eq!(show(&file("plain.txt", b"text")), "-rw-r--r--");
+        assert_eq!(show(&file("empty", b"")), "-rw-r--r--");
+        assert_eq!(show(&file("one", b"#")), "-rw-r--r--");
+        assert_eq!(show(&file("script", b"#!/bin/sh\n")), "-rwxr-xr-x");
+        assert_eq!(show(&file("prog", b"MZ\x90\x00")), "-rwxr-xr-x");
+        assert_eq!(show(&file("tool.EXE", b"")), "-rwxr-xr-x");
+        assert_eq!(show(&file("run.bat", b"@echo off")), "-rw-r--r--");
+        let ro = file("ro.sh", b"#!/bin/sh\n");
+        let mut perms = fs::metadata(&ro).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&ro, perms.clone()).unwrap();
+        assert_eq!(show(&ro), "-r-xr-xr-x");
+        #[allow(clippy::permissions_set_readonly_false)]
+        perms.set_readonly(false);
+        fs::set_permissions(&ro, perms).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_msys_owner() {
+        let owner = msys::owner();
+        assert!(!owner.user.is_empty());
+        assert!(owner.uid.parse::<u32>().is_ok());
+        assert!(owner.gid.parse::<u32>().is_ok());
+        if let Ok(name) = env::var("USERNAME") {
+            assert!(
+                owner.user.eq_ignore_ascii_case(&name),
+                "{owner:?} vs {name}"
+            );
+        }
+    }
 
     struct NormalizePathTestCase<'a> {
         path: &'a str,

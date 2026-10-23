@@ -33,6 +33,8 @@ use term_grid::{DEFAULT_SEPARATOR_SIZE, Direction, Filling, Grid, GridOptions};
 
 #[cfg(unix)]
 use uucore::entries;
+#[cfg(not(windows))]
+use uucore::fs::display_permissions;
 #[cfg(any(
     target_os = "freebsd",
     target_os = "hurd",
@@ -46,7 +48,6 @@ use uucore::libc::{dev_t, major, minor};
 use uucore::{
     error::UResult,
     format::human::human_readable,
-    fs::display_permissions,
     fsext::metadata_get_time,
     line_ending::LineEnding,
     os_str_as_bytes_lossy, os_string_from_vec,
@@ -264,7 +265,9 @@ fn display_dir_entry_size(
         };
         #[cfg(unix)]
         let nlink_len = digits(md.nlink());
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        let nlink_len = display_symlink_count(md, entry.path()).len();
+        #[cfg(not(any(unix, windows)))]
         let nlink_len = display_symlink_count(md).len();
         (
             nlink_len,
@@ -581,7 +584,7 @@ fn display_additional_leading_info(
 
     if config.alloc_size {
         let s: Cow<'_, str> = if let Some(md) = item.metadata() {
-            display_size(get_block_size(md, config), config).into()
+            display_size(get_block_size(md, item.path(), config), config).into()
         } else {
             "?".into()
         };
@@ -633,7 +636,24 @@ fn display_group<'a>(
     })
 }
 
-#[cfg(not(unix))]
+// Skua: Git Bash shows the current user and the number of the user's primary group as the
+// owner of every file on Windows (Cygwin `noacl` mounts); `-n` shows both ids.
+#[cfg(windows)]
+fn display_uname(_metadata: &Metadata, config: &Config, _uid_cache: &mut ()) -> &'static str {
+    let owner = uucore::fs::msys::owner();
+    if config.long.numeric_uid_gid {
+        &owner.uid
+    } else {
+        &owner.user
+    }
+}
+
+#[cfg(windows)]
+fn display_group(_metadata: &Metadata, _config: &Config, _gid_cache: &mut ()) -> &'static str {
+    &uucore::fs::msys::owner().gid
+}
+
+#[cfg(not(any(unix, windows)))]
 fn display_uname(_metadata: &Metadata, config: &Config, _uid_cache: &mut ()) -> &'static str {
     // No uid to report on this platform; with `-n` fall back to "0" so the
     // output still looks numeric, matching the intent of --numeric-uid-gid.
@@ -644,7 +664,7 @@ fn display_uname(_metadata: &Metadata, config: &Config, _uid_cache: &mut ()) -> 
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn display_group(_metadata: &Metadata, config: &Config, _gid_cache: &mut ()) -> &'static str {
     if config.long.numeric_uid_gid {
         return "0";
@@ -965,9 +985,12 @@ fn display_item_long(
             target_os = "netbsd"
         ))]
         let is_acl_set = has_acl(item.path(), item.must_dereference);
-        state
-            .display_buf
-            .extend(display_permissions(md, true).as_bytes());
+        // Skua: Git Bash's modes on Windows (dirs 755, files 644, executables 755).
+        #[cfg(windows)]
+        let permissions = uucore::fs::display_permissions_msys(md, item.path(), true);
+        #[cfg(not(windows))]
+        let permissions = display_permissions(md, true);
+        state.display_buf.extend(permissions.as_bytes());
         if padding.permissions > PERMISSIONS_WIDTH {
             state
                 .display_buf
@@ -976,7 +999,7 @@ fn display_item_long(
         state.display_buf.push(b' ');
         state
             .display_buf
-            .extend_pad_left(&display_symlink_count(md), padding.link_count);
+            .extend_pad_left(&display_link_count(md, item), padding.link_count);
 
         if config.long.owner {
             state.display_buf.push(b' ');
@@ -1310,7 +1333,23 @@ fn display_inode(metadata: &Metadata) -> impl Display {
     metadata.ino().to_string()
 }
 
-#[cfg(not(unix))]
+/// The link count column: on Windows the file's hard link count, as Git Bash shows it.
+fn display_link_count(metadata: &Metadata, item: &PathData) -> String {
+    #[cfg(windows)]
+    return display_symlink_count(metadata, item.path());
+    #[cfg(not(windows))]
+    {
+        let _ = item;
+        display_symlink_count(metadata)
+    }
+}
+
+#[cfg(windows)]
+fn display_symlink_count(metadata: &Metadata, path: &std::path::Path) -> String {
+    uucore::fs::msys::link_count(metadata, path).to_string()
+}
+
+#[cfg(not(any(unix, windows)))]
 fn display_symlink_count(_metadata: &Metadata) -> String {
     // Currently not sure of how to get this on Windows, so I'm punting.
     // Git Bash looks like it may do the same thing.
@@ -1352,7 +1391,8 @@ fn calculate_padding_collection(
         if config.alloc_size
             && let Some(md) = item.metadata()
         {
-            let block_size_len = display_size(get_block_size(md, config), config).len();
+            let block_size_len =
+                display_size(get_block_size(md, item.path(), config), config).len();
             padding_collections.block_size = block_size_len.max(padding_collections.block_size);
         }
 

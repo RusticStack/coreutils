@@ -1189,8 +1189,9 @@ fn test_ls_long() {
 
     #[cfg(not(windows))]
     let regex = r"[-bcCdDlMnpPsStTx?]([r-][w-][xt-]){3}.*";
+    // Skua: Git Bash's modes on Windows (a new empty file is rw-r--r--).
     #[cfg(windows)]
-    let regex = r"[-dl](r[w-]x){3}.*";
+    let regex = r"^-rw-r--r-- 1 \S+ \d+ 0 .* test-long\n$";
 
     let re = &Regex::new(regex).unwrap();
 
@@ -1198,6 +1199,57 @@ fn test_ls_long() {
         let result = scene.ucmd().arg(arg).arg("test-long").succeeds();
         result.stdout_matches(re);
     }
+}
+
+/// Skua: `ls -l` on Windows shows what Git Bash shows: the current user, the primary group's
+/// number, `drwxr-xr-x` for directories, `rwxr-xr-x` for `.exe` names and `#!`/`MZ` contents,
+/// `rw-r--r--` for other files, no `w` with the read-only attribute.
+#[cfg(windows)]
+#[test]
+fn test_ls_long_git_bash_modes_windows() {
+    let scene = TestScenario::new(util_name!());
+    let at = &scene.fixtures;
+    at.mkdir("dir");
+    at.write("script", "#!/bin/sh\n");
+    at.write("prog", "MZ");
+    at.touch("tool.exe");
+    at.write("plain", "text");
+    at.write("ro", "text");
+    let ro = at.plus("ro");
+    let mut perms = std::fs::metadata(&ro).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&ro, perms.clone()).unwrap();
+
+    let out = scene
+        .ucmd()
+        .args(&["-ld", "dir", "plain", "prog", "ro", "script", "tool.exe"])
+        .succeeds()
+        .stdout_move_str();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&ro, perms).unwrap();
+
+    let user = std::env::var("USERNAME").unwrap();
+    let modes: Vec<(&str, &str)> = out
+        .lines()
+        .map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            assert!(fields[2].eq_ignore_ascii_case(&user), "{line}");
+            assert!(fields[3].parse::<u32>().is_ok(), "{line}");
+            (fields[0], fields[fields.len() - 1])
+        })
+        .collect();
+    assert_eq!(
+        modes,
+        [
+            ("drwxr-xr-x", "dir"),
+            ("-rw-r--r--", "plain"),
+            ("-rwxr-xr-x", "prog"),
+            ("-r--r--r--", "ro"),
+            ("-rwxr-xr-x", "script"),
+            ("-rwxr-xr-x", "tool.exe"),
+        ]
+    );
 }
 
 #[cfg(not(windows))]

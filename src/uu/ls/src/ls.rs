@@ -1353,7 +1353,7 @@ fn write_directory_entries<O: LsOutput>(
             .map(|item| {
                 item.metadata()
                     .as_ref()
-                    .map_or(0, |md| get_block_size(md, config))
+                    .map_or(0, |md| get_block_size(md, item.path(), config))
             })
             .sum();
         output.write_total(total_size, config)?;
@@ -1646,7 +1646,7 @@ fn get_metadata_with_deref_opt(p_buf: &Path, dereference: bool) -> std::io::Resu
 }
 
 #[allow(unused_variables)]
-fn get_block_size(md: &Metadata, config: &Config) -> u64 {
+fn get_block_size(md: &Metadata, path: &Path, config: &Config) -> u64 {
     /* GNU ls will display sizes in terms of block size
        md.len() will differ from this value when the file has some holes
     */
@@ -1664,7 +1664,18 @@ fn get_block_size(md: &Metadata, config: &Config) -> u64 {
             SizeFormat::Bytes => raw_blocks / config.block_size,
         }
     }
-    #[cfg(not(unix))]
+    // Skua: the space Windows allocated for the file, as Git Bash counts its blocks.
+    #[cfg(windows)]
+    {
+        use uucore::format::human::SizeFormat;
+
+        let raw_blocks = uucore::fs::msys::allocated_bytes(md, path);
+        match config.size_format {
+            SizeFormat::Binary | SizeFormat::Decimal => raw_blocks,
+            SizeFormat::Bytes => raw_blocks / config.block_size,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         // no way to get block size for windows, fall-back to file size
         md.len()
