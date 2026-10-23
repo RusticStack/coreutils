@@ -1541,9 +1541,13 @@ pub fn copy(sources: &[PathBuf], target: &Path, options: &Options) -> CopyResult
                 &mut created_parent_dirs,
             ) {
                 match &error {
-                    // Skua: on Windows a missing source fails before any call that adds the
-                    // path; say what GNU cp says (`cannot stat 'x': No such file or directory`).
-                    CpError::IoErr(io_err) if io_err.kind() == io::ErrorKind::NotFound => {
+                    // Skua: on Windows a missing source fails in a call that drops the path
+                    // (`cp: <Windows text> (os error 2)`); say what GNU cp says, which stats
+                    // the source first: `cannot stat 'x': No such file or directory`.
+                    _ if cfg!(windows)
+                        && fs::symlink_metadata(source)
+                            .is_err_and(|e| e.kind() == io::ErrorKind::NotFound) =>
+                    {
                         show_error!(
                             "{}",
                             translate!(
