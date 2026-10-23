@@ -452,9 +452,7 @@ fn test_cp_multiple_files() {
 
 #[test]
 fn test_cp_multiple_files_with_nonexistent_file() {
-    #[cfg(windows)]
-    let error_msg = "The system cannot find the file specified";
-    #[cfg(not(windows))]
+    // Skua: Windows prints GNU's error text too.
     let error_msg = format!("'{TEST_NONEXISTENT_FILE}': No such file or directory");
     let (at, mut ucmd) = at_and_ucmd!();
     ucmd.arg(TEST_HELLO_WORLD_SOURCE)
@@ -474,9 +472,7 @@ fn test_cp_multiple_files_with_nonexistent_file() {
     ignore = "WASI: an empty path argument resolves to a directory instead of ENOENT"
 )]
 fn test_cp_multiple_files_with_empty_file_name() {
-    #[cfg(windows)]
-    let error_msg = "The system cannot find the path specified";
-    #[cfg(not(windows))]
+    // Skua: Windows prints GNU's error text too.
     let error_msg = "'': No such file or directory";
     let (at, mut ucmd) = at_and_ucmd!();
     ucmd.arg(TEST_HELLO_WORLD_SOURCE)

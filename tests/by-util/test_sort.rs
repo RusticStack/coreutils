@@ -1492,12 +1492,8 @@ fn test_nonexistent_file() {
     new_ucmd!()
         .arg("nonexistent.txt")
         .fails_with_code(2)
-        .stderr_only(
-            #[cfg(not(windows))]
-            "sort: cannot read: nonexistent.txt: No such file or directory\n",
-            #[cfg(windows)]
-            "sort: cannot read: nonexistent.txt: The system cannot find the file specified.\n",
-        );
+        // Skua: Windows prints GNU's error text too.
+        .stderr_only("sort: cannot read: nonexistent.txt: No such file or directory\n");
 }
 
 #[test]
@@ -1867,11 +1863,9 @@ fn test_verifies_out_file() {
             .pipe_in(input)
             .ignore_stdin_write_error()
             .fails_with_code(2)
+            // Skua: Windows prints GNU's error text too.
             .stderr_only(
-                #[cfg(not(windows))]
                 "sort: open failed: nonexistent_dir/nonexistent_file: No such file or directory\n",
-                #[cfg(windows)]
-                "sort: open failed: nonexistent_dir/nonexistent_file: The system cannot find the path specified.\n",
             );
     }
 }
@@ -2293,12 +2287,8 @@ fn test_files0_from_nonexistent_file_fails() {
     new_ucmd!()
         .args(&["--files0-from", "missing_file"])
         .fails_with_code(2)
-        .stderr_only(
-            #[cfg(not(windows))]
-            "sort: open failed: missing_file: No such file or directory\n",
-            #[cfg(windows)]
-            "sort: open failed: missing_file: The system cannot find the file specified.\n",
-        );
+        // Skua: Windows prints GNU's error text too.
+        .stderr_only("sort: open failed: missing_file: No such file or directory\n");
 }
 
 #[test]

@@ -10,10 +10,8 @@ use uutests::{at_and_ucmd, new_ucmd, path_concat, util_name};
 
 static GIBBERISH: &str = "supercalifragilisticexpialidocious";
 
-#[cfg(not(windows))]
+// Skua: Windows prints GNU's error text too.
 static NOT_A_DIRECTORY: &str = "Not a directory";
-#[cfg(windows)]
-static NOT_A_DIRECTORY: &str = "The directory name is invalid.";
 
 #[test]
 fn test_no_args() {

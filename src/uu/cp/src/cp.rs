@@ -1438,6 +1438,10 @@ fn show_error_if_needed(error: &CpError) {
         CpError::IoErrContext(io_err, context) | CpError::SelinuxContextIoErr(io_err, context) => {
             show_error!("{context}: {}", strip_errno(io_err));
         }
+        // Skua: no "(os error N)" and GNU's text on Windows for a bare I/O error too.
+        CpError::IoErr(io_err) => {
+            show_error!("{}", strip_errno(io_err));
+        }
         _ => {
             show_error!("{error}");
         }
@@ -1536,7 +1540,20 @@ pub fn copy(sources: &[PathBuf], target: &Path, options: &Options) -> CopyResult
                 &mut copied_files,
                 &mut created_parent_dirs,
             ) {
-                show_error_if_needed(&error);
+                match &error {
+                    // Skua: on Windows a missing source fails before any call that adds the
+                    // path; say what GNU cp says (`cannot stat 'x': No such file or directory`).
+                    CpError::IoErr(io_err) if io_err.kind() == io::ErrorKind::NotFound => {
+                        show_error!(
+                            "{}",
+                            translate!(
+                                "cp-error-cannot-stat",
+                                "source" => format!("'{}'", source.display())
+                            )
+                        );
+                    }
+                    _ => show_error_if_needed(&error),
+                }
                 if !matches!(error, CpError::Skipped(false)) {
                     non_fatal_errors = true;
                 }

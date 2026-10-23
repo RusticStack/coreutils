@@ -100,11 +100,8 @@ fn test_invalid_input() {
     let scene = TestScenario::new(util_name!());
     let at = &scene.fixtures;
 
-    #[cfg(not(windows))]
+    // Skua: Windows prints GNU's error text too.
     let not_found_err = "failed to open 'b' for reading: No such file or directory";
-    #[cfg(windows)]
-    let not_found_err =
-        "failed to open 'b' for reading: The system cannot find the file specified.";
 
     scene.ucmd().arg("b").fails().stderr_contains(not_found_err);
 
@@ -114,7 +111,7 @@ fn test_invalid_input() {
     #[cfg(not(windows))]
     let dir_err = "a: read error: Is a directory";
     #[cfg(windows)]
-    let dir_err = "failed to open 'a' for reading: Access is denied";
+    let dir_err = "failed to open 'a' for reading: Permission denied";
 
     scene.ucmd().arg("a").fails().stderr_contains(dir_err);
 }

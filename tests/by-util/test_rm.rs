@@ -170,9 +170,7 @@ fn test_non_empty_directory() {
     at.mkdir(dir);
     at.touch(file_a);
 
-    #[cfg(windows)]
-    let expected = "rm: cannot remove 'test_rm_non_empty_dir': The directory is not empty.\n";
-    #[cfg(not(windows))]
+    // Skua: Windows prints GNU's error text too.
     let expected = "rm: cannot remove 'test_rm_non_empty_dir': Directory not empty\n";
     ucmd.arg("-d").arg(dir).fails().stderr_only(expected);
     assert!(at.file_exists(file_a));
