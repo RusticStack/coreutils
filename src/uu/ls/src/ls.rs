@@ -963,6 +963,16 @@ impl<'a> PathData<'a> {
             && self.metadata().is_some_and(file_is_executable)
     }
 
+    /// Skua: executable as Git Bash decides it on Windows (`uucore::fs::msys::mode`: a `.exe`
+    /// or `.lnk` name, or `#!`/`MZ` contents), for `-F` (`*`) and the `ex` colour.
+    #[cfg(windows)]
+    pub(crate) fn is_executable_file(&self) -> bool {
+        self.file_type().is_some_and(|t| t.is_file())
+            && self
+                .metadata()
+                .is_some_and(|md| uucore::fs::msys::mode(md, self.path()) & 0o111 != 0)
+    }
+
     fn security_context(&self, config: &Config) -> &str {
         self.security_context
             .get_or_init(|| get_security_context(&self.p_buf, self.must_dereference, config).into())
@@ -1556,6 +1566,7 @@ fn sort_entries(entries: &mut [PathData], config: &Config) {
     // entries sharing a timestamp come out in a fixed order rather than in
     // whatever order the directory was read in, which is what GNU ls does and
     // what every other arm of this match already does.
+    let mut reversed = false;
     let use_locale = uucore::i18n::collator::should_use_locale_collation();
     let name_cmp = |a: &PathData, b: &PathData| {
         if use_locale {
@@ -1586,7 +1597,13 @@ fn sort_entries(entries: &mut [PathData], config: &Config) {
             });
         }
         // The default sort in GNU ls is case insensitive
-        Sort::Name => entries.sort_unstable_by(name_cmp),
+        // Skua: stable, and `-r` reverses the comparison, not the result, so names the locale
+        // finds equal (`ß`, `ss`) keep the directory's order, as in GNU ls (merge sort).
+        Sort::Name if config.reverse => {
+            entries.sort_by(|a, b| name_cmp(b, a));
+            reversed = true;
+        }
+        Sort::Name => entries.sort_by(name_cmp),
         Sort::Version => entries.sort_unstable_by(|a, b| {
             version_cmp(
                 os_str_as_bytes_lossy(a.display_name()).as_ref(),
@@ -1609,7 +1626,7 @@ fn sort_entries(entries: &mut [PathData], config: &Config) {
         Sort::None => {}
     }
 
-    if config.reverse {
+    if config.reverse && !reversed {
         entries.reverse();
     }
 

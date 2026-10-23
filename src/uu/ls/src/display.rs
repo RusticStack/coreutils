@@ -1238,7 +1238,12 @@ fn classify_file(path: &PathData) -> Option<char> {
                 None
             }
         }
-        #[cfg(not(unix))]
+        // Skua: `*` for executables on Windows, as in Git Bash.
+        #[cfg(windows)]
+        {
+            path.is_executable_file().then_some('*')
+        }
+        #[cfg(not(any(unix, windows)))]
         None
     }
 }

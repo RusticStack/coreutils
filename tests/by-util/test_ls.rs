@@ -2213,7 +2213,12 @@ fn test_ls_sort_dot_first_utf8_locale() {
         .env("LC_ALL", "en_US.UTF-8")
         .arg("-1a")
         .succeeds()
-        .stdout_is(".\n..\n#asdf\nbar\nfoo\n");
+        // Skua: on Windows `#` sorts before `.` (Git Bash, Cygwin CompareStringW).
+        .stdout_is(if cfg!(windows) {
+            "#asdf\n.\n..\nbar\nfoo\n"
+        } else {
+            ".\n..\n#asdf\nbar\nfoo\n"
+        });
 }
 
 #[test]

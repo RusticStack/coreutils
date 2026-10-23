@@ -249,6 +249,16 @@ impl<'a> StyleManager<'a> {
         let style = self
             .colors
             .style_for_path_with_metadata(&path.p_buf, md_option);
+        // Skua: lscolors finds no executables on Windows; Git Bash colours them `ex` (before
+        // any extension pattern, as GNU ls does).
+        #[cfg(windows)]
+        let style = if md_option.is_some_and(Metadata::is_file) && path.is_executable_file() {
+            self.colors
+                .style_for_indicator(Indicator::ExecutableFile)
+                .or(style)
+        } else {
+            style
+        };
         self.apply_style(style, Some(path), name, wrap)
     }
 
@@ -259,6 +269,15 @@ impl<'a> StyleManager<'a> {
         wrap: bool,
     ) -> OsString {
         let style = self.colors.style_for(path);
+        // Skua: see `apply_style_based_on_metadata`.
+        #[cfg(windows)]
+        let style = if path.is_executable_file() {
+            self.colors
+                .style_for_indicator(Indicator::ExecutableFile)
+                .or(style)
+        } else {
+            style
+        };
         self.apply_style(style, Some(path), name, wrap)
     }
 
@@ -444,6 +463,11 @@ impl<'a> StyleManager<'a> {
 
     #[cfg(not(unix))]
     fn indicator_for_file(&self, _path: &PathData) -> Option<Indicator> {
+        // Skua: executables (as Git Bash decides them) get the `ex` colour on Windows.
+        #[cfg(windows)]
+        if self.has_indicator_style(Indicator::ExecutableFile) && _path.is_executable_file() {
+            return Some(Indicator::ExecutableFile);
+        }
         if self.has_indicator_style(Indicator::RegularFile) {
             Some(Indicator::RegularFile)
         } else {
