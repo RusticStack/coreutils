@@ -19,7 +19,7 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::MAIN_SEPARATOR;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use uucore::display::Quotable;
 use uucore::error::{FromIo, UError, UResult, USimpleError, strip_errno};
@@ -67,12 +67,23 @@ fn write_verbose_line(message: &str) -> UResult<()> {
     Ok(())
 }
 
+/// The path verbose messages name. Skua: on Windows, the path as rm reached it (`d/x`, as Git
+/// Bash's rm prints `removed 'd/x'`); `normalize_path` would turn its `/` into `\`.
+fn shown_path(path: &Path) -> PathBuf {
+    if cfg!(windows) {
+        path.to_path_buf()
+    } else {
+        uucore::fs::normalize_path(path)
+    }
+}
+
 /// Helper function to print verbose message for removed file
+
 fn verbose_removed_file(path: &Path, options: &Options) -> UResult<()> {
     if options.verbose {
         write_verbose_line(&translate!(
             "rm-verbose-removed",
-            "file" => uucore::fs::normalize_path(path).quote()
+            "file" => shown_path(path).quote()
         ))?;
     }
     Ok(())
@@ -83,7 +94,7 @@ fn verbose_removed_directory(path: &Path, options: &Options) -> UResult<()> {
     if options.verbose {
         write_verbose_line(&translate!(
             "rm-verbose-removed-directory",
-            "file" => uucore::fs::normalize_path(path).quote()
+            "file" => shown_path(path).quote()
         ))?;
     }
     Ok(())
@@ -660,7 +671,16 @@ fn is_writable_metadata(metadata: &Metadata) -> bool {
     (mode & 0o200) > 0
 }
 
-#[cfg(not(unix))]
+/// Skua: on Windows the read-only attribute is the write bit, as Git Bash (Cygwin `noacl`)
+/// shows it: `chmod a-w` sets it, and `rm` then asks "remove write-protected regular file?" when
+/// stdin is a terminal. Cygwin shows a directory writable whatever its attribute, so a directory
+/// is never write-protected here.
+#[cfg(windows)]
+fn is_writable_metadata(metadata: &Metadata) -> bool {
+    metadata.is_dir() || !metadata.permissions().readonly()
+}
+
+#[cfg(not(any(unix, windows)))]
 fn is_writable_metadata(_metadata: &Metadata) -> bool {
     true
 }
@@ -736,8 +756,11 @@ fn remove_dir_recursive(
                     match entry {
                         Err(_) => error = true,
                         Ok(entry) => {
-                            let child_error =
-                                remove_dir_recursive(&entry.path(), options, progress_bar);
+                            let child_error = remove_dir_recursive(
+                                &child_path(path, &entry),
+                                options,
+                                progress_bar,
+                            );
                             error = error || child_error;
                         }
                     }
@@ -776,6 +799,30 @@ fn remove_dir_recursive(
         }
 
         error
+    }
+}
+
+/// The path of a directory entry, as messages and prompts name it. Skua: on Windows the entry is
+/// joined to its directory with `/`, as Git Bash's rm names it (`rm: remove write-protected
+/// regular file 'd/x'?`, `removed 'd/x'`), not `\`; Windows accepts both.
+#[cfg(any(not(unix), target_os = "redox"))]
+fn child_path(dir: &Path, entry: &fs::DirEntry) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let mut joined = dir.as_os_str().to_owned();
+        if !matches!(
+            dir.as_os_str().as_encoded_bytes().last(),
+            Some(b'/' | b'\\' | b':') | None
+        ) {
+            joined.push("/");
+        }
+        joined.push(entry.file_name());
+        PathBuf::from(joined)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = dir;
+        entry.path()
     }
 }
 
@@ -958,7 +1005,8 @@ fn prompt_file(path: &Path, options: &Options) -> bool {
         return if metadata.len() == 0 {
             prompt_yes!("remove regular empty file {}?", path.quote())
         } else {
-            prompt_yes!("remove file {}?", path.quote())
+            // GNU's wording (Skua: Git Bash's rm says `remove regular file 'w'?`).
+            prompt_yes!("remove regular file {}?", path.quote())
         };
     }
 
@@ -1073,16 +1121,15 @@ fn handle_writable_directory(path: &Path, options: &Options, metadata: &Metadata
     }
 }
 
-// For Windows, metadata.permissions().readonly() checks FILE_ATTRIBUTE_READONLY
+// Skua: on Windows a directory is never write-protected (see `is_writable_metadata`): Git Bash's
+// rm removes a directory with the read-only attribute without asking, and `-i` asks
+// "remove directory 'd'?" as for any directory.
 #[cfg(windows)]
-fn handle_writable_directory(path: &Path, options: &Options, metadata: &Metadata) -> bool {
-    let not_user_writable = metadata.permissions().readonly();
-    let stdin_ok = options.__presume_input_tty.unwrap_or(false) || stdin().is_terminal();
-    match (stdin_ok, not_user_writable, options.interactive) {
-        (false, _, InteractiveMode::PromptProtected) => true,
-        (_, true, _) => prompt_yes!("remove write-protected directory {}?", path.quote()),
-        (_, _, InteractiveMode::Always) => prompt_yes!("remove directory {}?", path.quote()),
-        (_, _, _) => true,
+fn handle_writable_directory(path: &Path, options: &Options, _metadata: &Metadata) -> bool {
+    if options.interactive == InteractiveMode::Always {
+        prompt_yes!("remove directory {}?", path.quote())
+    } else {
+        true
     }
 }
 
@@ -1100,7 +1147,8 @@ fn handle_writable_directory(path: &Path, options: &Options, _metadata: &Metadat
 /// Removes trailing slashes, for example 'd/../////' yield 'd/../' required to fix rm-r4 GNU test
 fn clean_trailing_slashes(path: &Path) -> &Path {
     let path_str = os_str_as_bytes(path.as_os_str());
-    let dir_separator = MAIN_SEPARATOR as u8;
+    // Skua: on Windows `/` is a separator too (`rm -r d///` removes `d/`, as Git Bash's rm).
+    let is_sep = |b: u8| b == MAIN_SEPARATOR as u8 || (cfg!(windows) && b == b'/');
 
     if let Ok(path_bytes) = path_str {
         let mut idx = if path_bytes.len() > 1 {
@@ -1109,12 +1157,12 @@ fn clean_trailing_slashes(path: &Path) -> &Path {
             return path;
         };
         // Checks if element at the end is a '/'
-        if path_bytes[idx] == dir_separator {
+        if is_sep(path_bytes[idx]) {
             for i in (1..path_bytes.len()).rev() {
                 // Will break at the start of the continuous sequence of '/', eg: "abc//////" , will break at
                 // "abc/", this will clean ////// to the root '/', so we have to be careful to not
                 // delete the root.
-                if path_bytes[i - 1] != dir_separator {
+                if !is_sep(path_bytes[i - 1]) {
                     idx = i;
                     break;
                 }

@@ -54,13 +54,12 @@ jobs:
             test(=test_help_messages_french_translation) |
             test(=test_french_colored_error_messages))
           # Windows chmod only sets/clears the read-only attribute (Skua M3-SH10, as Git Bash):
-          # ls_io_errors needs symlinks and unreadable dirs, and rm on Windows has no
-          # write-protected prompt (rm_prompt*), so these Unix-permission tests can't hold.
+          # ls_io_errors needs symlinks and unreadable dirs; test_prompts (Windows expectations
+          # updated in M3-SH11, not run here yet) stays out. rm's write-protected
+          # file prompts run (M3-SH11).
           SKIP_CHMOD_PERMS: >-
             binary_id(coreutils::tests) & (
             test(=test_ls::test_ls_io_errors) |
-            test(=test_rm::test_prompt_write_protected_yes) |
-            test(=test_rm::test_prompt_write_protected_no) |
             test(=test_rm::test_prompts))
         run: cargo nextest run --hide-progress-bar --profile ci --locked --features windows,stat,chmod -E "not ((${SKIP_CHMOD_L10N}) | (${SKIP_CHMOD_PERMS}))"
       - name: Test uucore and the crates Skua changed (unit tests)

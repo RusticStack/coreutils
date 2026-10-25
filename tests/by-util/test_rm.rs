@@ -510,8 +510,13 @@ fn test_verbose_slash() {
     at.mkdir(dir);
     at.touch(file_a);
 
-    let file_a_normalized = &format!(
-        "{dir}{}test_rm_verbose_slash_file_a",
+    // Skua: on Windows as Git Bash's rm prints it: one trailing `/` kept, children joined by `/`.
+    #[cfg(windows)]
+    let expected =
+        format!("removed '{dir}/test_rm_verbose_slash_file_a'\nremoved directory '{dir}/'\n");
+    #[cfg(not(windows))]
+    let expected = format!(
+        "removed '{dir}{}test_rm_verbose_slash_file_a'\nremoved directory '{dir}'\n",
         std::path::MAIN_SEPARATOR
     );
 
@@ -520,9 +525,7 @@ fn test_verbose_slash() {
         .arg("-v")
         .arg(format!("{dir}///"))
         .succeeds()
-        .stdout_only(format!(
-            "removed '{file_a_normalized}'\nremoved directory '{dir}'\n"
-        ));
+        .stdout_only(expected);
 
     assert!(!at.dir_exists(dir));
     assert!(!at.file_exists(file_a));
@@ -697,7 +700,11 @@ fn test_prompts() {
         "rm: remove write-protected regular file 'a/f-no-write'?",
         "rm: remove regular empty file 'a/empty'?",
         "rm: remove directory 'a/b'?",
+        // Skua: Windows directories are never write-protected (Git Bash).
+        #[cfg(not(windows))]
         "rm: remove write-protected directory 'a/b-no-write'?",
+        #[cfg(windows)]
+        "rm: remove directory 'a/b-no-write'?",
         "rm: remove directory 'a'?",
     ];
 
@@ -1067,9 +1074,10 @@ fn test_uchild_when_run_no_wait_with_a_blocking_command() {
         .with_current_output()
         .stdout_is("rm: descend into directory 'a'? ");
 
+    // Skua: children are named with `/` on Windows too, as Git Bash's rm names them.
     #[cfg(windows)]
     let expected = "rm: descend into directory 'a'? \
-                    rm: remove regular empty file 'a\\empty'? ";
+                    rm: remove regular empty file 'a/empty'? ";
     #[cfg(unix)]
     let expected = "rm: descend into directory 'a'? \
                     rm: remove regular empty file 'a/empty'? ";
@@ -1081,7 +1089,7 @@ fn test_uchild_when_run_no_wait_with_a_blocking_command() {
         .stdout_is(expected);
 
     #[cfg(windows)]
-    let expected = "removed 'a\\empty'\nrm: remove directory 'a'? ";
+    let expected = "removed 'a/empty'\nrm: remove directory 'a'? ";
     #[cfg(unix)]
     let expected = "removed 'a/empty'\nrm: remove directory 'a'? ";
 
@@ -1103,10 +1111,7 @@ fn test_recursive_interactive() {
     let (at, mut ucmd) = at_and_ucmd!();
     at.mkdir("a");
     at.mkdir("a/b");
-    #[cfg(windows)]
-    let expected =
-        "rm: descend into directory 'a'? rm: remove directory 'a\\b'? rm: remove directory 'a'? ";
-    #[cfg(not(windows))]
+    // Skua: children are named with `/` on Windows too, as Git Bash's rm names them.
     let expected =
         "rm: descend into directory 'a'? rm: remove directory 'a/b'? rm: remove directory 'a'? ";
     ucmd.args(&["-i", "-r", "a"])

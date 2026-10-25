@@ -236,15 +236,10 @@ impl<'a> ErrorFormatter<'a> {
             self.print_simple_error_msg(&err.render().to_string());
         }
 
-        // InvalidValue errors traditionally use exit code 1 for backward compatibility
-        // But if a utility explicitly requests a high exit code (>= 125), respect it
-        // This allows utilities like runcon (125) to override the default while preserving
-        // the standard behavior for utilities using normal error codes (1, 2, etc.)
-        if err.kind() == ErrorKind::InvalidValue && exit_code < 125 {
-            1 // Force exit code 1 for InvalidValue unless using special exit codes
-        } else {
-            exit_code // Respect the requested exit code for special cases
-        }
+        // Skua: the utility's own usage-error status, as GNU's: `grep -A` and `sort -k` without a
+        // value exit 2 (Git Bash), not 1. Upstream forced 1 for InvalidValue below 125, which
+        // made a grep usage error look like "no match".
+        exit_code
     }
 
     /// Handle missing required argument errors

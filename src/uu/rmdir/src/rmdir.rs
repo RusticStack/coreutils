@@ -117,7 +117,32 @@ fn remove_single(path: &Path, opts: Opts) -> Result<(), Error<'_>> {
             translate!("rmdir-verbose-removing-directory", "util_name" => "rmdir", "path" => path.quote())
         );
     }
-    remove_dir(path).map_err(|error| Error { error, path })
+    remove_dir_clearing_read_only(path).map_err(|error| Error { error, path })
+}
+
+/// `remove_dir`, but on Windows an empty directory with the read-only attribute (`chmod -w dir`)
+/// is removed too, as Git Bash's rmdir (Cygwin) removes it (Skua); Windows refuses with "access
+/// denied" otherwise. The attribute comes back if the directory still cannot be removed.
+fn remove_dir_clearing_read_only(path: &Path) -> io::Result<()> {
+    let result = remove_dir(path);
+    #[cfg(windows)]
+    if let Err(error) = &result
+        && error.raw_os_error() == Some(5)
+        && let Ok(md) = std::fs::symlink_metadata(path)
+        && md.is_dir()
+        && md.permissions().readonly()
+    {
+        let mut perms = md.permissions();
+        perms.set_readonly(false);
+        std::fs::set_permissions(path, perms.clone())?;
+        let retry = remove_dir(path);
+        if retry.is_err() {
+            perms.set_readonly(true);
+            let _ = std::fs::set_permissions(path, perms);
+        }
+        return retry;
+    }
+    result
 }
 
 #[cfg(unix)]
