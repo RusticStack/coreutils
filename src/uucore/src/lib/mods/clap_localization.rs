@@ -236,10 +236,15 @@ impl<'a> ErrorFormatter<'a> {
             self.print_simple_error_msg(&err.render().to_string());
         }
 
-        // Skua: the utility's own usage-error status, as GNU's: `grep -A` and `sort -k` without a
-        // value exit 2 (Git Bash), not 1. Upstream forced 1 for InvalidValue below 125, which
-        // made a grep usage error look like "no match".
-        exit_code
+        // Skua: an option without its value is a getopt error, with the utility's own usage
+        // status (`sort -k` exits 2 in Git Bash). A bad value keeps upstream's forced 1 below 125
+        // (`ls --color=bogus` exits 1 in Git Bash too).
+        let missing_value = invalid_value.is_some_and(|v| v.to_string().is_empty());
+        if err.kind() == ErrorKind::InvalidValue && exit_code < 125 && !missing_value {
+            1
+        } else {
+            exit_code
+        }
     }
 
     /// Handle missing required argument errors

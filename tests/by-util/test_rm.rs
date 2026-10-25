@@ -1128,9 +1128,7 @@ fn test_recursive_symlink_loop() {
     let (at, mut ucmd) = at_and_ucmd!();
     at.mkdir("d");
     at.relative_symlink_file(".", "d/link");
-    #[cfg(windows)]
-    let expected = "rm: descend into directory 'd'? rm: remove symbolic link 'd\\link'? rm: remove directory 'd'? ";
-    #[cfg(not(windows))]
+    // Skua: children are named with `/` on Windows too, as Git Bash's rm names them.
     let expected = "rm: descend into directory 'd'? rm: remove symbolic link 'd/link'? rm: remove directory 'd'? ";
     ucmd.args(&["-i", "-r", "d"])
         .pipe_in("y\ny\ny\n")
