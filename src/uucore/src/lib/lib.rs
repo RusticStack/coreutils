@@ -414,6 +414,9 @@ static EXECUTION_PHRASE: LazyLock<String> = LazyLock::new(|| {
             .map(|os_str| os_str.to_string_lossy().into_owned())
             .collect::<Vec<_>>()
             .join(" ")
+    } else if cfg!(windows) {
+        // Skua: Windows passes the full path as argv[0]; Git Bash says `Try 'sed --help'`.
+        util_name().to_owned()
     } else {
         ARGV[0].to_string_lossy().into_owned()
     }

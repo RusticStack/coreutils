@@ -87,6 +87,7 @@ impl ColorManager {
 pub struct ErrorFormatter<'a> {
     color_mgr: ColorManager,
     util_name: &'a str,
+    usage: Option<String>,
 }
 
 impl<'a> ErrorFormatter<'a> {
@@ -94,7 +95,16 @@ impl<'a> ErrorFormatter<'a> {
         Self {
             color_mgr: ColorManager::from_env(),
             util_name,
+            usage: None,
         }
+    }
+
+    /// The usage line to show when the utility has no `<util>-usage` translation (Skua: grep,
+    /// sed and findutils carry no locale files; without this the line read `Usage: grep-usage`).
+    #[must_use]
+    pub fn with_usage(mut self, usage: String) -> Self {
+        self.usage = Some(usage);
+        self
     }
 
     /// Print error and exit with the specified code
@@ -236,15 +246,10 @@ impl<'a> ErrorFormatter<'a> {
             self.print_simple_error_msg(&err.render().to_string());
         }
 
-        // InvalidValue errors traditionally use exit code 1 for backward compatibility
-        // But if a utility explicitly requests a high exit code (>= 125), respect it
-        // This allows utilities like runcon (125) to override the default while preserving
-        // the standard behavior for utilities using normal error codes (1, 2, etc.)
-        if err.kind() == ErrorKind::InvalidValue && exit_code < 125 {
-            1 // Force exit code 1 for InvalidValue unless using special exit codes
-        } else {
-            exit_code // Respect the requested exit code for special cases
-        }
+        // Skua: the utility's own usage-error status, as GNU's: `grep -A` and `sort -k` without a
+        // value exit 2 (Git Bash), not 1. Upstream forced 1 for InvalidValue below 125, which
+        // made a grep usage error look like "no match".
+        exit_code
     }
 
     /// Handle missing required argument errors
@@ -355,7 +360,12 @@ impl<'a> ErrorFormatter<'a> {
     /// Print usage information and help suggestion
     fn print_usage_and_help(&self) {
         let usage_key = format!("{}-usage", self.util_name);
-        let usage_text = translate!(&usage_key);
+        let mut usage_text = translate!(&usage_key);
+        if usage_text == usage_key
+            && let Some(usage) = &self.usage
+        {
+            usage_text.clone_from(usage);
+        }
         let formatted_usage = crate::format_usage(&usage_text);
         let usage_label = translate!("common-usage");
         let _ = writeln!(
@@ -473,11 +483,19 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    let mut usage_cmd = cmd.clone();
     cmd.try_get_matches_from(itr).map_err(|e| {
         if e.exit_code() == 0 {
             e.into() // Preserve help/version
         } else {
-            let formatter = ErrorFormatter::new(crate::util_name());
+            // Skua: the command's own usage, without clap's `Usage: ` label (printed again).
+            let usage = usage_cmd.render_usage().to_string();
+            let usage = usage
+                .strip_prefix("Usage: ")
+                .unwrap_or(&usage)
+                .trim_end()
+                .to_owned();
+            let formatter = ErrorFormatter::new(crate::util_name()).with_usage(usage);
             let code = formatter.print_error(&e, exit_code);
             USimpleError::new(code, "")
         }
