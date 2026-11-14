@@ -37,9 +37,9 @@
 //! ```
 
 use std::borrow::Cow;
-use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
+#[cfg(not(windows))]
 use std::io::IsTerminal;
 use std::ops::Range;
 use std::sync::OnceLock;
@@ -95,16 +95,20 @@ impl Mode {
 pub fn enabled() -> bool {
     // Decided once: a utility may ask for every location it records.
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| match Mode::from_env(env::var_os(MODE_VAR).as_deref()) {
+    let compute = || match Mode::from_env(crate::inproc::var_os(MODE_VAR).as_deref()) {
         Mode::Always => true,
         Mode::Never => false,
-        Mode::Auto => std::io::stderr().is_terminal(),
-    })
+        Mode::Auto => crate::inproc::stderr().is_terminal(),
+    };
+    if crate::inproc::active() {
+        return compute();
+    }
+    *ENABLED.get_or_init(compute)
 }
 
 /// Whether a drawn report is colored: at a terminal, unless `NO_COLOR` is set.
 pub fn use_color() -> bool {
-    env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal()
+    crate::inproc::var_os("NO_COLOR").is_none() && crate::inproc::stderr().is_terminal()
 }
 
 /// Keep the arguments a diagnostic would point at, as they were typed.

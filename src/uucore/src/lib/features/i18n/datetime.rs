@@ -15,13 +15,16 @@ use icu_datetime::fieldsets;
 use icu_locale::Locale;
 use jiff::civil::Date as JiffDate;
 use jiff_icu::ConvertFrom;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use crate::i18n::get_locale_from_env;
 
 /// Get the locale for time/date formatting from `LC_TIME` environment variable
 pub fn get_time_locale() -> &'static (Locale, super::UEncoding) {
     static TIME_LOCALE: OnceLock<(Locale, super::UEncoding)> = OnceLock::new();
+    if crate::inproc::active() {
+        return super::intern_locale(get_locale_from_env("LC_TIME"));
+    }
 
     TIME_LOCALE.get_or_init(|| get_locale_from_env("LC_TIME"))
 }
@@ -196,8 +199,28 @@ pub fn localize_format_string(format: &str, date: JiffDate) -> String {
 /// Each entry corresponds to months January (index 0) through December (index 11).
 /// Returns `None` for C/POSIX locale (caller should use English defaults).
 /// This matches the GNU coreutils approach of storing uppercased, blank-stripped names.
+type LocaleMonths = Option<&'static [Vec<u8>; 12]>;
+
 pub fn get_locale_months() -> Option<&'static [Vec<u8>; 12]> {
     static LOCALE_MONTHS: OnceLock<Option<[Vec<u8>; 12]>> = OnceLock::new();
+    static INPROC_MONTHS: OnceLock<Mutex<Vec<(Locale, LocaleMonths)>>> = OnceLock::new();
+    if crate::inproc::active() {
+        if !should_use_icu_locale() {
+            return None;
+        }
+        let loc = get_time_locale().0.clone();
+        let cache = INPROC_MONTHS.get_or_init(|| Mutex::new(Vec::new()));
+        let mut guard = cache.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((_, existing)) = guard.iter().find(|(k, _)| *k == loc) {
+            return *existing;
+        }
+        let leaked = get_locale_months_inner().map(|months| {
+            let boxed: &'static [Vec<u8>; 12] = Box::leak(Box::new(months));
+            boxed
+        });
+        guard.push((loc, leaked));
+        return leaked;
+    }
 
     LOCALE_MONTHS
         .get_or_init(|| {

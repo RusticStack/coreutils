@@ -484,7 +484,8 @@ pub fn args_os_filtered() -> impl Iterator<Item = OsString> {
 /// Read a line from stdin and check whether the first character is `'y'` or `'Y'`
 pub fn read_yes() -> bool {
     let mut s = String::new();
-    std::io::stdin().read_line(&mut s).is_ok() && matches!(s.chars().next(), Some('y' | 'Y'))
+    BufRead::read_line(&mut inproc::stdin().lock(), &mut s).is_ok()
+        && matches!(s.chars().next(), Some('y' | 'Y'))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -646,12 +647,12 @@ pub fn read_os_string_lines<R: std::io::Read>(
 macro_rules! prompt_yes(
     ($($args:tt)+) => ({
         use std::io::Write;
-        eprint!("{}: ", uucore::util_name());
-        eprint!($($args)+);
-        eprint!(" ");
-        let res = std::io::stderr().flush().map_err(|err| {
-            $crate::error::USimpleError::new(1, err.to_string())
-        });
+        let mut err = $crate::inproc::stderr();
+        let res = write!(err, "{}: ", uucore::util_name())
+            .and_then(|()| write!(err, $($args)+))
+            .and_then(|()| write!(err, " "))
+            .and_then(|()| err.flush())
+            .map_err(|err| $crate::error::USimpleError::new(1, err.to_string()));
         uucore::show_if_err!(res);
         uucore::read_yes()
     })

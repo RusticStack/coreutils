@@ -3,7 +3,7 @@
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use icu_locale::{Locale, locale};
 
@@ -153,9 +153,24 @@ pub fn get_locale_from_os() -> (Locale, UEncoding) {
     (DEFAULT_LOCALE, UEncoding::Ascii)
 }
 
+pub(crate) fn intern_locale(pair: (Locale, UEncoding)) -> &'static (Locale, UEncoding) {
+    static CACHE: OnceLock<Mutex<Vec<&'static (Locale, UEncoding)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(Vec::new()));
+    let mut guard = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(&existing) = guard.iter().find(|&&entry| *entry == pair) {
+        return existing;
+    }
+    let leaked: &'static (Locale, UEncoding) = Box::leak(Box::new(pair));
+    guard.push(leaked);
+    leaked
+}
+
 /// Get the collating locale from the environment
 pub fn get_collating_locale() -> &'static (Locale, UEncoding) {
     static COLLATING_LOCALE: OnceLock<(Locale, UEncoding)> = OnceLock::new();
+    if crate::inproc::active() {
+        return intern_locale(get_locale_from_env("LC_COLLATE"));
+    }
 
     COLLATING_LOCALE.get_or_init(|| get_locale_from_env("LC_COLLATE"))
 }
@@ -163,6 +178,9 @@ pub fn get_collating_locale() -> &'static (Locale, UEncoding) {
 /// Get the numeric locale from the environment
 pub fn get_numeric_locale() -> &'static (Locale, UEncoding) {
     static NUMERIC_LOCALE: OnceLock<(Locale, UEncoding)> = OnceLock::new();
+    if crate::inproc::active() {
+        return intern_locale(get_locale_from_env("LC_NUMERIC"));
+    }
 
     NUMERIC_LOCALE.get_or_init(|| get_locale_from_env("LC_NUMERIC"))
 }
@@ -175,6 +193,9 @@ pub fn get_locale_encoding() -> UEncoding {
 /// Return the character-type encoding (`LC_CTYPE`) deduced from the environment.
 pub fn get_ctype_encoding() -> UEncoding {
     static CTYPE_ENCODING: OnceLock<UEncoding> = OnceLock::new();
+    if crate::inproc::active() {
+        return get_locale_from_env("LC_CTYPE").1;
+    }
 
     *CTYPE_ENCODING.get_or_init(|| get_locale_from_env("LC_CTYPE").1)
 }

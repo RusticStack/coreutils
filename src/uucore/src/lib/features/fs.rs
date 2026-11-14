@@ -14,7 +14,9 @@ use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
 use std::fs::read_dir;
 use std::hash::Hash;
-use std::io::{Error, ErrorKind, Result as IOResult, Stdin};
+#[cfg(not(windows))]
+use std::io::Stdin;
+use std::io::{Error, ErrorKind, Result as IOResult};
 #[cfg(any(unix, target_os = "wasi"))]
 use std::os::fd::AsFd;
 #[cfg(unix)]
@@ -26,7 +28,9 @@ use std::os::windows::io::AsRawHandle;
 use std::path::{Component, MAIN_SEPARATOR, Path, PathBuf};
 #[cfg(unix)]
 use std::sync::OnceLock;
-use std::{env, fs};
+#[cfg(test)]
+use std::env;
+use std::fs;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::MAX_PATH;
 #[cfg(windows)]
@@ -357,8 +361,10 @@ pub fn canonicalize<P: AsRef<Path>>(
         };
     let original = if original.is_absolute() {
         original.to_path_buf()
+    } else if original.has_root() {
+        crate::inproc::resolve(original).into_owned()
     } else {
-        let current_dir = env::current_dir()?;
+        let current_dir = crate::inproc::current_dir()?;
         dunce::canonicalize(current_dir)?.join(original)
     };
     let path = if res_mode == ResolveMode::Logical {
@@ -1214,6 +1220,16 @@ pub fn path_ends_with_terminator(path: &Path) -> bool {
 /// # Returns
 ///
 /// * `bool` - Returns `true` if stdin is a directory, `false` otherwise.
+#[cfg(windows)]
+pub fn is_stdin_directory(stdin: &impl AsRawHandle) -> bool {
+    let handle = stdin.as_raw_handle();
+    if let Ok(metadata) = fs::metadata(format!("{}", handle as usize)) {
+        return metadata.is_dir();
+    }
+    false
+}
+
+#[cfg(not(windows))]
 pub fn is_stdin_directory(stdin: &Stdin) -> bool {
     #[cfg(any(unix, all(target_os = "wasi", target_env = "p2")))]
     {
@@ -1224,16 +1240,6 @@ pub fn is_stdin_directory(stdin: &Stdin) -> bool {
             // We use the S_IFMT mask ala S_ISDIR() to avoid mistaking
             // sockets for directories.
             return mode & S_IFMT == S_IFDIR;
-        }
-        false
-    }
-
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        let handle = stdin.as_raw_handle();
-        if let Ok(metadata) = fs::metadata(format!("{}", handle as usize)) {
-            return metadata.is_dir();
         }
         false
     }

@@ -3,7 +3,7 @@
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use icu_decimal::provider::DecimalSymbolsV1;
 use icu_locale::{Locale, locale};
@@ -26,6 +26,21 @@ fn get_decimal_separator(loc: Locale) -> String {
     response.payload.get().decimal_separator().to_string()
 }
 
+fn intern_locale_str(
+    cache: &OnceLock<Mutex<Vec<(Locale, &'static str)>>>,
+    loc: Locale,
+    build: impl FnOnce(Locale) -> String,
+) -> &'static str {
+    let cache = cache.get_or_init(|| Mutex::new(Vec::new()));
+    let mut guard = cache.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some((_, existing)) = guard.iter().find(|(k, _)| *k == loc) {
+        return existing;
+    }
+    let leaked: &'static str = Box::leak(build(loc.clone()).into_boxed_str());
+    guard.push((loc, leaked));
+    leaked
+}
+
 /// Return the decimal separator from the language we're working with.
 /// Example:
 ///  Say we need to format 1000.5
@@ -33,6 +48,14 @@ fn get_decimal_separator(loc: Locale) -> String {
 ///     `fr_FR`: 1 000,5 -> decimal separator is ','
 pub fn locale_decimal_separator() -> &'static str {
     static DECIMAL_SEP: OnceLock<String> = OnceLock::new();
+    static INPROC_CACHE: OnceLock<Mutex<Vec<(Locale, &'static str)>>> = OnceLock::new();
+    if crate::inproc::active() {
+        return intern_locale_str(
+            &INPROC_CACHE,
+            get_numeric_locale().0.clone(),
+            get_decimal_separator,
+        );
+    }
 
     DECIMAL_SEP.get_or_init(|| get_decimal_separator(get_numeric_locale().0.clone()))
 }
@@ -59,16 +82,20 @@ fn get_grouping_separator(loc: Locale) -> String {
 ///     `fr_FR`: 1 000 -> grouping separator is '\u{202f}'
 pub fn locale_grouping_separator() -> &'static str {
     static GROUPING_SEP: OnceLock<String> = OnceLock::new();
-
-    GROUPING_SEP.get_or_init(|| {
-        let loc = get_numeric_locale().0.clone();
+    static INPROC_CACHE: OnceLock<Mutex<Vec<(Locale, &'static str)>>> = OnceLock::new();
+    let build = |loc: Locale| {
         // C/POSIX locale (represented as "und") has no grouping separator.
         if loc == locale!("und") {
             String::new()
         } else {
             get_grouping_separator(loc)
         }
-    })
+    };
+    if crate::inproc::active() {
+        return intern_locale_str(&INPROC_CACHE, get_numeric_locale().0.clone(), build);
+    }
+
+    GROUPING_SEP.get_or_init(|| build(get_numeric_locale().0.clone()))
 }
 
 #[cfg(test)]

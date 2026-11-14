@@ -72,6 +72,14 @@ mod other {
     /// Never a context on this platform: nothing to note.
     pub fn note_pipe_closed() {}
     /// A file opened for reading by a utility (the std one on this platform).
+    /// Never a context on this platform.
+    pub const fn run_id() -> u64 {
+        0
+    }
+    /// `std::env::current_dir`.
+    pub fn current_dir() -> std::io::Result<std::path::PathBuf> {
+        std::env::current_dir()
+    }
     pub type CtxFile = std::fs::File;
     /// `File::open`.
     pub fn open(path: impl AsRef<Path>) -> std::io::Result<CtxFile> {
@@ -87,9 +95,9 @@ mod imp {
     use std::fs::File;
     use std::io::{self, BufRead, BufReader, IsTerminal as _, LineWriter, Read, Write};
     use std::mem::ManuallyDrop;
-    use std::os::windows::io::{AsRawHandle, FromRawHandle, RawHandle};
+    use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, RawHandle};
     use std::path::{Component, Path, PathBuf};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::sync::{Arc, Mutex, Once, PoisonError};
 
     /// Unwind payload for an `exit` taken inside a host.
@@ -262,8 +270,11 @@ mod imp {
         }
     }
 
+    static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
+
     thread_local! {
         static ACTIVE: Cell<bool> = const { Cell::new(false) };
+        static RUN_ID: Cell<u64> = const { Cell::new(0) };
         static NAME: Cell<Option<&'static str>> = const { Cell::new(None) };
         static EXIT_CODE: Cell<i32> = const { Cell::new(0) };
         static STDIN: Cell<Option<RawFile>> = const { Cell::new(None) };
@@ -282,6 +293,11 @@ mod imp {
     /// Whether a host is running a utility on this thread.
     pub fn active() -> bool {
         ACTIVE.with(Cell::get)
+    }
+
+    /// Per-invocation id while a context is active on this thread (`0` otherwise).
+    pub fn run_id() -> u64 {
+        RUN_ID.with(Cell::get)
     }
 
     /// The utility name of the context, if this thread runs one.
@@ -373,6 +389,7 @@ mod imp {
             cancel,
         } = inv;
         ACTIVE.with(|a| a.set(true));
+        RUN_ID.with(|id| id.set(NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed)));
         NAME.with(|n| n.set(Some(util_name)));
         EXIT_CODE.with(|c| c.set(0));
         STDIN.with(|s| s.set(Some(RawFile::new(stdin as isize))));
@@ -404,6 +421,7 @@ mod imp {
         CANCEL.with(|c| *c.borrow_mut() = None);
         cancel.detach();
         ACTIVE.with(|a| a.set(false));
+        RUN_ID.with(|id| id.set(0));
         NAME.with(|n| n.set(None));
         STDIN.with(|s| s.set(None));
         STDERR.with(|s| s.set(None));
@@ -704,11 +722,53 @@ mod imp {
         }
     }
 
+    /// # Safety
+    ///
+    /// `raw` must be a valid open Windows handle that outlives `'a`.
+    unsafe fn borrow_raw_handle<'a>(raw: RawHandle) -> BorrowedHandle<'a> {
+        assert!(
+            !raw.is_null() && raw != (-1isize as RawHandle),
+            "inproc stream handle is null or invalid"
+        );
+        // SAFETY: caller guarantees the host keeps the handle open for the borrow lifetime.
+        unsafe { BorrowedHandle::borrow_raw(raw) }
+    }
+
     impl AsRawHandle for Stdin {
         fn as_raw_handle(&self) -> RawHandle {
             match self {
                 Self::Std(s) => s.as_raw_handle(),
                 Self::Ctx => ctx_stdin().map_or(std::ptr::null_mut(), RawFile::raw),
+            }
+        }
+    }
+
+    impl AsHandle for Stdin {
+        fn as_handle(&self) -> BorrowedHandle<'_> {
+            match self {
+                Self::Std(s) => s.as_handle(),
+                Self::Ctx => {
+                    let raw = ctx_stdin().map_or(std::ptr::null_mut(), RawFile::raw);
+                    unsafe { borrow_raw_handle(raw) }
+                }
+            }
+        }
+    }
+
+    impl AsRawHandle for StdinLock {
+        fn as_raw_handle(&self) -> RawHandle {
+            match self {
+                Self::Std(s) => s.as_raw_handle(),
+                Self::Ctx(r) => r.get_ref().0.raw(),
+            }
+        }
+    }
+
+    impl AsHandle for StdinLock {
+        fn as_handle(&self) -> BorrowedHandle<'_> {
+            match self {
+                Self::Std(s) => s.as_handle(),
+                Self::Ctx(r) => unsafe { borrow_raw_handle(r.get_ref().0.raw()) },
             }
         }
     }
@@ -814,6 +874,33 @@ mod imp {
         }
     }
 
+    impl AsHandle for Stdout {
+        fn as_handle(&self) -> BorrowedHandle<'_> {
+            match self {
+                Self::Std(s) => s.as_handle(),
+                Self::Ctx => unsafe { borrow_raw_handle(ctx_stdout_raw()) },
+            }
+        }
+    }
+
+    impl AsRawHandle for StdoutLock {
+        fn as_raw_handle(&self) -> RawHandle {
+            match self {
+                Self::Std(s) => s.as_raw_handle(),
+                Self::Ctx => ctx_stdout_raw(),
+            }
+        }
+    }
+
+    impl AsHandle for StdoutLock {
+        fn as_handle(&self) -> BorrowedHandle<'_> {
+            match self {
+                Self::Std(s) => s.as_handle(),
+                Self::Ctx => unsafe { borrow_raw_handle(ctx_stdout_raw()) },
+            }
+        }
+    }
+
     impl Stdout {
         /// As `IsTerminal::is_terminal` (that trait cannot be implemented outside std).
         pub fn is_terminal(&self) -> bool {
@@ -884,6 +971,39 @@ mod imp {
             match self {
                 Self::Std(s) => s.as_raw_handle(),
                 Self::Ctx => ctx_stderr().map_or(std::ptr::null_mut(), RawFile::raw),
+            }
+        }
+    }
+
+    impl AsHandle for Stderr {
+        fn as_handle(&self) -> BorrowedHandle<'_> {
+            match self {
+                Self::Std(s) => s.as_handle(),
+                Self::Ctx => {
+                    let raw = ctx_stderr().map_or(std::ptr::null_mut(), RawFile::raw);
+                    unsafe { borrow_raw_handle(raw) }
+                }
+            }
+        }
+    }
+
+    impl AsRawHandle for StderrLock {
+        fn as_raw_handle(&self) -> RawHandle {
+            match self {
+                Self::Std(s) => s.as_raw_handle(),
+                Self::Ctx => ctx_stderr().map_or(std::ptr::null_mut(), RawFile::raw),
+            }
+        }
+    }
+
+    impl AsHandle for StderrLock {
+        fn as_handle(&self) -> BorrowedHandle<'_> {
+            match self {
+                Self::Std(s) => s.as_handle(),
+                Self::Ctx => {
+                    let raw = ctx_stderr().map_or(std::ptr::null_mut(), RawFile::raw);
+                    unsafe { borrow_raw_handle(raw) }
+                }
             }
         }
     }
@@ -1265,6 +1385,190 @@ mod tests {
         }
         // Outside a context nothing changes.
         assert_eq!(resolve(r"\file.txt").as_ref(), Path::new(r"\file.txt"));
+        drop(f);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn handle_traits_work_for_streams_and_locks() {
+        use std::os::windows::io::AsHandle as _;
+        let (f_in, p_in) = temp("hin");
+        let (f_out, p_out) = temp("hout");
+        let (f_err, p_err) = temp("herr");
+        let expected = [
+            f_in.as_raw_handle(),
+            f_out.as_raw_handle(),
+            f_err.as_raw_handle(),
+        ];
+        let inv = invocation("cat", [&f_in, &f_out, &f_err], &[]);
+        let seen = std::sync::Mutex::new(Vec::new());
+        let code = run(inv, || {
+            let sin = stdin();
+            let sin_lock = sin.lock();
+            let sout = stdout();
+            let sout_lock = sout.lock();
+            let serr = stderr();
+            let serr_lock = serr.lock();
+            *seen.lock().unwrap() = vec![
+                sin.as_raw_handle(),
+                sin.as_handle().as_raw_handle(),
+                sin_lock.as_raw_handle(),
+                sin_lock.as_handle().as_raw_handle(),
+                sout.as_raw_handle(),
+                sout.as_handle().as_raw_handle(),
+                sout_lock.as_raw_handle(),
+                sout_lock.as_handle().as_raw_handle(),
+                serr.as_raw_handle(),
+                serr.as_handle().as_raw_handle(),
+                serr_lock.as_raw_handle(),
+                serr_lock.as_handle().as_raw_handle(),
+            ];
+            0
+        });
+        assert_eq!(code, 0);
+        let got = seen.into_inner().unwrap();
+        assert_eq!(
+            got,
+            vec![
+                expected[0], expected[0], expected[0], expected[0],
+                expected[1], expected[1], expected[1], expected[1],
+                expected[2], expected[2], expected[2], expected[2],
+            ]
+        );
+        drop((f_in, f_out, f_err));
+        for p in [p_in, p_out, p_err] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[test]
+    fn read_yes_and_prompt_yes_use_inproc_streams() {
+        use crate as uucore;
+        let (in_r, mut in_w) = std::io::pipe().unwrap();
+        let (err_f, err_p) = temp("py_err");
+        let (out_f, out_p) = temp("py_out");
+        in_w.write_all(b"yes\nno\n").unwrap();
+        drop(in_w);
+        let inv = invocation_raw(
+            "rm",
+            [in_r.as_raw_handle(), out_f.as_raw_handle(), err_f.as_raw_handle()],
+            &[],
+        );
+        let answers = std::sync::Mutex::new((false, false));
+        let code = run(inv, || {
+            let first = crate::prompt_yes!("remove '{}'?", "a");
+            let second = crate::prompt_yes!("remove '{}'?", "b");
+            *answers.lock().unwrap() = (first, second);
+            0
+        });
+        assert_eq!(code, 0);
+        assert_eq!(*answers.lock().unwrap(), (true, false));
+        drop((in_r, err_f, out_f));
+        assert_eq!(
+            std::fs::read_to_string(&err_p).unwrap(),
+            "rm: remove 'a'? rm: remove 'b'? "
+        );
+        for p in [err_p, out_p] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    #[cfg(feature = "fs")]
+    #[test]
+    fn canonicalize_uses_inproc_current_dir() {
+        let base = std::env::temp_dir().join(format!("uucore-inproc-canon-{}", std::process::id()));
+        let sub = base.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        let file = sub.join("target.txt");
+        std::fs::write(&file, b"ok").unwrap();
+
+        let (f, p) = temp("canon");
+        let mut inv = invocation("realpath", [&f, &f, &f], &[]);
+        inv.cwd = sub.clone();
+        let got = std::sync::Mutex::new(PathBuf::new());
+        let code = run(inv, || {
+            *got.lock().unwrap() = crate::fs::canonicalize(
+                "target.txt",
+                crate::fs::MissingHandling::Normal,
+                crate::fs::ResolveMode::Physical,
+            )
+            .unwrap();
+            0
+        });
+        assert_eq!(code, 0);
+        let expected = dunce::canonicalize(&file).unwrap();
+        assert_eq!(*got.lock().unwrap(), expected);
+
+        drop(f);
+        let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&sub);
+        let _ = std::fs::remove_dir(&base);
+    }
+
+    #[cfg(feature = "diagnostics")]
+    #[test]
+    fn diagnostics_follows_inproc_env() {
+        let (f, p) = temp("diag");
+        for (diag, no_color, want_enabled, want_color) in [
+            ("always", None, true, false),
+            ("never", None, false, false),
+            ("always", Some("1"), true, false),
+        ] {
+            let mut env = vec![("UUTILS_DIAG", diag)];
+            if let Some(nc) = no_color {
+                env.push(("NO_COLOR", nc));
+            }
+            let inv = invocation("head", [&f, &f, &f], &env);
+            let res = std::sync::Mutex::new((false, true));
+            let code = run(inv, || {
+                *res.lock().unwrap() = (
+                    crate::diagnostics::enabled(),
+                    crate::diagnostics::use_color(),
+                );
+                0
+            });
+            assert_eq!(code, 0);
+            assert_eq!(*res.lock().unwrap(), (want_enabled, want_color));
+        }
+        drop(f);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[cfg(all(
+        feature = "i18n-collator",
+        feature = "i18n-decimal",
+        feature = "i18n-datetime"
+    ))]
+    #[test]
+    fn i18n_follows_inproc_env_across_calls() {
+        let (f, p) = temp("i18n");
+        let run_with = |lc: &str| {
+            let inv = invocation("ls", [&f, &f, &f], &[("LC_ALL", lc)]);
+            let out = std::sync::Mutex::new(None);
+            let code = run(inv, || {
+                let inited = crate::i18n::collator::init_locale_collation();
+                let active = crate::i18n::collator::collator_is_active();
+                let sep = crate::i18n::decimal::locale_decimal_separator();
+                let icu_time = crate::i18n::datetime::should_use_icu_locale();
+                let loc = crate::i18n::get_collating_locale().0.to_string();
+                *out.lock().unwrap() = Some((inited, active, sep, icu_time, loc));
+                0
+            });
+            assert_eq!(code, 0);
+            out.into_inner().unwrap().unwrap()
+        };
+
+        assert_eq!(run_with("C"), (false, false, ".", false, "und".to_string()));
+        assert_eq!(
+            run_with("fr_FR.UTF-8"),
+            (true, true, ",", true, "fr-FR".to_string())
+        );
+        assert_eq!(run_with("C"), (false, false, ".", false, "und".to_string()));
+        assert_eq!(
+            run_with("en_US.UTF-8"),
+            (true, true, ".", true, "en-US".to_string())
+        );
         drop(f);
         let _ = std::fs::remove_file(p);
     }

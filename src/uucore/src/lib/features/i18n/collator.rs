@@ -3,6 +3,7 @@
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::sync::OnceLock;
 
@@ -20,25 +21,62 @@ pub use icu_collator::options::{
 
 static COLLATOR: OnceLock<CollatorBorrowed> = OnceLock::new();
 
+thread_local! {
+    static INPROC_COLLATOR: RefCell<Option<(u64, CollatorBorrowed)>> = const { RefCell::new(None) };
+}
+
+fn with_inproc_collator<R>(f: impl FnOnce(Option<&CollatorBorrowed>) -> R) -> R {
+    let id = crate::inproc::run_id();
+    INPROC_COLLATOR.with(|cell| {
+        let guard = cell.borrow();
+        let active = guard.as_ref().and_then(|(gid, c)| (*gid == id).then_some(c));
+        f(active)
+    })
+}
+
+fn try_init_inproc_collator(build: impl FnOnce() -> Option<CollatorBorrowed>) -> bool {
+    let id = crate::inproc::run_id();
+    INPROC_COLLATOR.with(|cell| {
+        let mut guard = cell.borrow_mut();
+        if guard.as_ref().is_some_and(|(gid, _)| *gid == id) {
+            return false;
+        }
+        let Some(collator) = build() else {
+            return false;
+        };
+        *guard = Some((id, collator));
+        true
+    })
+}
+
 /// Will initialize the collator if not already initialized.
 /// returns `true` if initialization happened
 #[cfg(not(windows))]
 pub fn try_init_collator(opts: CollatorOptions) -> bool {
-    COLLATOR
-        .set(CollatorBorrowed::try_new(get_collating_locale().0.clone().into(), opts).unwrap())
-        .is_ok()
+    let build = || Some(CollatorBorrowed::try_new(get_collating_locale().0.clone().into(), opts).unwrap());
+    if crate::inproc::active() {
+        return try_init_inproc_collator(build);
+    }
+    build().is_some_and(|c| COLLATOR.set(c).is_ok())
 }
 
 /// Skua: on Windows the collator is Windows' own (see `windows_collator`); `opts` are ignored.
 /// Returns `false` (byte order stays) when Windows does not know the locale.
 #[cfg(windows)]
 pub fn try_init_collator(_opts: CollatorOptions) -> bool {
+    if crate::inproc::active() {
+        return try_init_inproc_collator(windows_collator::Collator::new);
+    }
     windows_collator::Collator::new().is_some_and(|c| COLLATOR.set(c).is_ok())
 }
 
 /// Will initialize the collator and panic if already initialized.
 #[cfg(not(windows))]
 pub fn init_collator(opts: CollatorOptions) {
+    if crate::inproc::active() {
+        assert!(try_init_collator(opts), "Collator already initialized");
+        return;
+    }
     COLLATOR
         .set(CollatorBorrowed::try_new(get_collating_locale().0.clone().into(), opts).unwrap())
         .expect("Collator already initialized");
@@ -62,7 +100,13 @@ pub fn should_use_locale_collation() -> bool {
 
 /// Skua: whether [`locale_cmp`] compares by a locale (a collator is initialized), not by bytes.
 pub fn collator_is_active() -> bool {
-    get_collating_locale().0 != DEFAULT_LOCALE && COLLATOR.get().is_some()
+    if get_collating_locale().0 == DEFAULT_LOCALE {
+        return false;
+    }
+    if crate::inproc::active() {
+        return with_inproc_collator(|c| c.is_some());
+    }
+    COLLATOR.get().is_some()
 }
 
 /// Initialize the collator for locale-aware string comparison if needed.
@@ -109,6 +153,14 @@ pub fn init_locale_collation() -> bool {
 /// This allows pre-computing sort keys once per line, then comparing them with simple
 /// byte comparison during sorting (much faster than calling `compare_utf8` per comparison).
 pub fn compute_sort_key_utf8(input: &[u8], buf: &mut Vec<u8>) {
+    if crate::inproc::active() {
+        with_inproc_collator(|c| {
+            let c = c.expect("compute_sort_key_utf8 called before collator initialization");
+            c.write_sort_key_utf8_to(input, buf)
+                .expect("ICU write_sort_key_utf8_to failed");
+        });
+        return;
+    }
     let c = COLLATOR
         .get()
         .expect("compute_sort_key_utf8 called before collator initialization");
@@ -121,6 +173,8 @@ pub fn locale_cmp(left: &[u8], right: &[u8]) -> Ordering {
     // If the detected locale is 'C', just do byte-wise comparison
     if get_collating_locale().0 == DEFAULT_LOCALE {
         left.cmp(right)
+    } else if crate::inproc::active() {
+        with_inproc_collator(|c| c.map_or_else(|| left.cmp(right), |c| c.compare_utf8(left, right)))
     } else {
         // Fall back to byte comparison if collator is not available
         COLLATOR
@@ -139,8 +193,9 @@ pub fn locale_cmp(left: &[u8], right: &[u8]) -> Ordering {
 #[cfg(windows)]
 mod windows_collator {
     use std::cmp::Ordering;
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock, PoisonError};
 
+    use icu_locale::Locale;
     use windows_sys::Win32::Globalization::{
         COMPARESTRING_RESULT, CSTR_EQUAL, CSTR_LESS_THAN, CompareStringEx, IsValidLocaleName,
         LCMAP_SORTKEY, LCMapStringEx,
@@ -148,21 +203,39 @@ mod windows_collator {
 
     use crate::i18n::get_collating_locale;
 
+    fn resolve_locale_name(loc: &Locale) -> Option<Vec<u16>> {
+        let name: Vec<u16> = loc
+            .to_string()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: `name` is NUL-terminated.
+        (unsafe { IsValidLocaleName(name.as_ptr()) } != 0).then_some(name)
+    }
+
+    type LocaleName = Option<&'static [u16]>;
+
     /// The collating locale as a Windows locale name (`en-US`), NUL-terminated; `None` when
     /// Windows does not know it.
     fn locale_name() -> Option<&'static [u16]> {
         static NAME: OnceLock<Option<Vec<u16>>> = OnceLock::new();
-        NAME.get_or_init(|| {
-            let name: Vec<u16> = get_collating_locale()
-                .0
-                .to_string()
-                .encode_utf16()
-                .chain(std::iter::once(0))
-                .collect();
-            // SAFETY: `name` is NUL-terminated.
-            (unsafe { IsValidLocaleName(name.as_ptr()) } != 0).then_some(name)
-        })
-        .as_deref()
+        static INPROC_NAMES: OnceLock<Mutex<Vec<(Locale, LocaleName)>>> = OnceLock::new();
+        if crate::inproc::active() {
+            let loc = get_collating_locale().0.clone();
+            let cache = INPROC_NAMES.get_or_init(|| Mutex::new(Vec::new()));
+            let mut guard = cache.lock().unwrap_or_else(PoisonError::into_inner);
+            if let Some((_, existing)) = guard.iter().find(|(k, _)| *k == loc) {
+                return *existing;
+            }
+            let leaked = resolve_locale_name(&loc).map(|name| {
+                let boxed: &'static [u16] = Box::leak(name.into_boxed_slice());
+                boxed
+            });
+            guard.push((loc, leaked));
+            return leaked;
+        }
+        NAME.get_or_init(|| resolve_locale_name(&get_collating_locale().0))
+            .as_deref()
     }
 
     pub fn locale_is_known() -> bool {
