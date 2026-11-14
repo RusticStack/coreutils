@@ -20,14 +20,11 @@ doctest = false
 [dependencies]
 clap = { workspace = true }
 fluent = { workspace = true }
-icu_calendar = { workspace = true, optional = true }
-icu_locale = { workspace = true, optional = true }
 jiff = { workspace = true, features = [
   "tzdb-bundle-platform",
   "tzdb-zoneinfo",
   "tzdb-concatenated",
 ] }
-jiff-icu = { workspace = true, optional = true }
 parse_datetime = { workspace = true }
 thiserror = { workspace = true }
 uucore = { workspace = true, features = [
@@ -68,9 +65,6 @@ uucore = { workspace = true, features = ["benchmark"] }
 default = ["i18n-datetime"]
 i18n-datetime = [
   "uucore/i18n-datetime",
-  "dep:icu_calendar",
-  "dep:icu_locale",
-  "dep:jiff-icu",
 ]
 
 [lints]

@@ -21,7 +21,6 @@ clap = { workspace = true }
 fluent = { workspace = true }
 regex = { workspace = true }
 rustc-hash = { workspace = true }
-thiserror = { workspace = true }
 uucore = { workspace = true }
 
 [dev-dependencies]
