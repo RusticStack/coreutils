@@ -17,10 +17,10 @@ use simd::process_input;
 use std::ffi::OsString;
 #[cfg(not(any(unix, target_os = "wasi")))]
 use std::io::Write;
-use std::io::{stdin, stdout};
 use uucore::display::Quotable;
 use uucore::error::{UResult, USimpleError, UUsageError};
 use uucore::fs::is_stdin_directory;
+use uucore::inproc::{stdin, stdout};
 use uucore::translate;
 use uucore::{format_usage, os_str_as_bytes, show};
 

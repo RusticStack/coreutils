@@ -11,11 +11,13 @@ use clap::{
 };
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, Write, stdin, stdout};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::num::IntErrorKind;
+use std::path::Path;
 use uucore::display::Quotable;
 use uucore::error::{FromIo, UError, UResult, USimpleError};
 use uucore::format_usage;
+use uucore::inproc::{CtxFile, StdinLock, open, resolve, stdin, stdout, var_os};
 use uucore::io::InputReader;
 use uucore::parser::shortcut_value_parser::ShortcutValueParser;
 use uucore::posix::{OBSOLETE, posix_version};
@@ -146,11 +148,11 @@ impl Uniq {
         {
             writer
                 .write_all(&[line_terminator])
-                .map_err_context(|| translate!("uniq-error-write-line-terminator"))?;
+                .map_err(|e| map_write_err(e, || translate!("uniq-error-write-line-terminator")))?;
         }
         writer
             .flush()
-            .map_err_context(|| translate!("uniq-error-write-error"))?;
+            .map_err(|e| map_write_err(e, || translate!("uniq-error-write-error")))?;
         read_result
     }
 
@@ -213,7 +215,7 @@ impl Uniq {
     fn is_c_locale() -> bool {
         ["LC_ALL", "LC_CTYPE", "LANG"]
             .iter()
-            .find_map(|&key| std::env::var_os(key))
+            .find_map(|&key| var_os(key))
             .filter(|v| !v.is_empty())
             .is_none_or(|v| v == "C" || v == "POSIX")
     }
@@ -312,7 +314,7 @@ impl Uniq {
 
         writer
             .write_all(line_out)
-            .map_err_context(|| translate!("uniq-error-write-error"))
+            .map_err(|e| map_write_err(e, || translate!("uniq-error-write-error")))
     }
 
     const COUNT_PREFIX_WIDTH: usize = 7;
@@ -861,11 +863,19 @@ fn get_delimiter(matches: &ArgMatches) -> Delimiters {
     }
 }
 
+fn map_write_err(err: std::io::Error, ctx: impl FnOnce() -> String) -> Box<dyn UError> {
+    if err.kind() == std::io::ErrorKind::BrokenPipe {
+        USimpleError::new(141, String::new())
+    } else {
+        err.map_err_context(ctx)
+    }
+}
+
 // None or "-" means stdin.
-fn open_input_file(in_file_name: Option<&OsStr>) -> UResult<InputReader> {
+fn open_input_file(in_file_name: Option<&OsStr>) -> UResult<InputReader<BufReader<CtxFile>, StdinLock>> {
     Ok(match in_file_name {
         Some(path) if path != "-" => {
-            let in_file = File::open(path).map_err_context(|| path.maybe_quote().to_string())?;
+            let in_file = open(path).map_err_context(|| path.maybe_quote().to_string())?;
             InputReader::File(BufReader::with_capacity(OUTPUT_BUFFER_CAPACITY, in_file))
         }
         _ => InputReader::Stdin(stdin().lock()),
@@ -876,7 +886,8 @@ fn open_input_file(in_file_name: Option<&OsStr>) -> UResult<InputReader> {
 fn open_output_file(out_file_name: Option<&OsStr>) -> UResult<Box<dyn Write>> {
     Ok(match out_file_name {
         Some(path) if path != "-" => {
-            let out_file = File::create(path).map_err_context(|| path.maybe_quote().to_string())?;
+            let out_file = File::create(resolve(Path::new(path)))
+                .map_err_context(|| path.maybe_quote().to_string())?;
             Box::new(BufWriter::with_capacity(OUTPUT_BUFFER_CAPACITY, out_file))
         }
         _ => Box::new(BufWriter::with_capacity(

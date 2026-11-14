@@ -81,7 +81,7 @@ fn tee(options: &Options) -> Result<(), ()> {
             #[cfg(any(unix, target_os = "wasi"))]
             inner: Writer::Stdout(uucore::io::RawWriter(rustix::stdio::stdout())),
             #[cfg(not(any(unix, target_os = "wasi")))]
-            inner: Writer::Stdout(io::stdout()),
+            inner: Writer::Stdout(uucore::inproc::stdout()),
         },
     );
 
@@ -118,7 +118,11 @@ fn open(
     } else {
         options.truncate(true)
     };
-    match mode.write(true).create(true).open(path.as_path()) {
+    match mode
+        .write(true)
+        .create(true)
+        .open(uucore::inproc::resolve(&path))
+    {
         Ok(file) => Some(Ok(NamedWriter {
             inner: Writer::File(file),
             name: name.clone(),
@@ -158,7 +162,7 @@ impl MultiWriter {
         #[cfg(any(unix, target_os = "wasi"))]
         let input = rustix::stdio::stdin();
         #[cfg(not(any(unix, target_os = "wasi")))]
-        let mut input = io::stdin();
+        let mut input = uucore::inproc::stdin();
         // needs 2 pipes to duplicate input multiple times
         // freeze by max size since system allocates pipe smaller than default size when user has pages more than fs.pipe-user-pages-soft
         #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -231,6 +235,7 @@ impl MultiWriter {
                 Ok([]) => return Ok(()), // end of file
                 Ok(slice) => self.write_flush(slice)?,
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) if uucore::inproc::is_cancelled_error(&e) => return Err(()),
                 Err(e) => {
                     show_error!(
                         "{}",
@@ -302,7 +307,7 @@ enum Writer {
     #[cfg(any(unix, target_os = "wasi"))]
     Stdout(uucore::io::RawWriter<rustix::fd::BorrowedFd<'static>>),
     #[cfg(not(any(unix, target_os = "wasi")))]
-    Stdout(io::Stdout),
+    Stdout(uucore::inproc::Stdout),
 }
 
 impl Writer {

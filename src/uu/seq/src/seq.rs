@@ -6,7 +6,7 @@
 // spell-checker:ignore (ToDO) bigdecimal extendedbigdecimal numberparse hexadecimalfloat biguint
 
 use std::ffi::{OsStr, OsString};
-use std::io::{BufWriter, Write, stdout};
+use std::io::{BufWriter, Write};
 
 use clap::{Arg, ArgAction, Command};
 use num_bigint::BigUint;
@@ -17,6 +17,7 @@ use uucore::error::{FromIo, UResult};
 use uucore::extendedbigdecimal::ExtendedBigDecimal;
 use uucore::format::num_format::FloatVariant;
 use uucore::format::{Format, num_format};
+use uucore::inproc::stdout;
 use uucore::{fast_inc::fast_inc, format_usage};
 
 mod diagnostics;

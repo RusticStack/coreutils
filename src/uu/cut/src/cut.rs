@@ -9,12 +9,14 @@ use bstr::io::BufReadExt;
 use clap::builder::{PossibleValue, ValueParser};
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use std::ffi::OsString;
-use std::fs::File;
-use std::io::{BufRead, BufReader, BufWriter, IsTerminal, Read, Write, stdin, stdout};
+#[cfg(not(windows))]
+use std::io::IsTerminal;
+use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::Path;
 use uucore::display::Quotable;
 use uucore::error::{FromIo, UResult, USimpleError, UUsageError, set_exit_code, strip_errno};
 use uucore::i18n::charmap::{Encoding, locale_encoding, mb_char_len};
+use uucore::inproc::{open, resolve, stdin, stdout};
 use uucore::line_ending::LineEnding;
 use uucore::os_str_as_bytes;
 use uucore::parser::shortcut_value_parser::ShortcutValueParser;
@@ -1210,15 +1212,41 @@ fn cut_fields<R: Read, W: Write>(
     }
 }
 
-fn cut_files<'a, I>(filenames: I, mode: &Mode)
+struct PipeAwareWriter<W> {
+    inner: W,
+    broken_pipe: bool,
+}
+
+impl<W: Write> Write for PipeAwareWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let res = self.inner.write(buf);
+        if matches!(&res, Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe) {
+            self.broken_pipe = true;
+        }
+        res
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let res = self.inner.flush();
+        if matches!(&res, Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe) {
+            self.broken_pipe = true;
+        }
+        res
+    }
+}
+
+fn cut_files<'a, I>(filenames: I, mode: &Mode) -> UResult<()>
 where
     I: IntoIterator<Item = &'a OsString>,
 {
     let mut stdin_read = false;
-    let mut out: Box<dyn Write> = if stdout().is_terminal() {
-        Box::new(stdout())
-    } else {
-        Box::new(BufWriter::new(stdout())) as Box<dyn Write>
+    let mut out = PipeAwareWriter {
+        inner: if stdout().is_terminal() {
+            Box::new(stdout()) as Box<dyn Write>
+        } else {
+            Box::new(BufWriter::new(stdout())) as Box<dyn Write>
+        },
+        broken_pipe: false,
     };
 
     for filename in filenames {
@@ -1227,15 +1255,19 @@ where
                 continue;
             }
 
-            show_if_err!(match mode {
+            let res = match mode {
                 Mode::Bytes(ranges, opts) => cut_chars(stdin(), &mut out, ranges, opts, false),
                 Mode::Characters(ranges, opts) => cut_chars(stdin(), &mut out, ranges, opts, true),
                 Mode::Fields(ranges, opts) => cut_fields(stdin(), &mut out, ranges, opts),
-            });
+            };
+            if out.broken_pipe {
+                return Err(USimpleError::new(141, String::new()));
+            }
+            show_if_err!(res);
 
             stdin_read = true;
         } else {
-            let path = Path::new(filename);
+            let path = resolve(Path::new(filename));
 
             if path.is_dir() {
                 show_error!(
@@ -1247,28 +1279,30 @@ where
                 continue;
             }
 
-            show_if_err!(
-                File::open(path)
-                    .map_err_context(|| filename.maybe_quote().to_string())
-                    .and_then(|file| {
-                        match &mode {
-                            Mode::Bytes(ranges, opts) => {
-                                cut_chars(file, &mut out, ranges, opts, false)
-                            }
-                            Mode::Characters(ranges, opts) => {
-                                cut_chars(file, &mut out, ranges, opts, true)
-                            }
-                            Mode::Fields(ranges, opts) => cut_fields(file, &mut out, ranges, opts),
-                        }
-                    })
-            );
+            let res = open(filename)
+                .map_err_context(|| filename.maybe_quote().to_string())
+                .and_then(|file| match &mode {
+                    Mode::Bytes(ranges, opts) => cut_chars(file, &mut out, ranges, opts, false),
+                    Mode::Characters(ranges, opts) => {
+                        cut_chars(file, &mut out, ranges, opts, true)
+                    }
+                    Mode::Fields(ranges, opts) => cut_fields(file, &mut out, ranges, opts),
+                });
+            if out.broken_pipe {
+                return Err(USimpleError::new(141, String::new()));
+            }
+            show_if_err!(res);
         }
     }
 
-    show_if_err!(
-        out.flush()
-            .map_err_context(|| translate!("cut-error-write-error"))
-    );
+    let flush_res = out
+        .flush()
+        .map_err_context(|| translate!("cut-error-write-error"));
+    if out.broken_pipe {
+        return Err(USimpleError::new(141, String::new()));
+    }
+    show_if_err!(flush_res);
+    Ok(())
 }
 
 /// Get delimiter and output delimiter from `-d`/`--delimiter` and `--output-delimiter` options respectively
@@ -1458,9 +1492,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     #[allow(clippy::unwrap_used, reason = "clap provides '-' by default")]
     let files = matches.get_many::<OsString>(options::FILE).unwrap();
 
-    cut_files(files, &mode);
-
-    Ok(())
+    cut_files(files, &mode)
 }
 
 // Exactly one of the cutting mode arguments `-b`, `-c`, `-f` or `-F` must be

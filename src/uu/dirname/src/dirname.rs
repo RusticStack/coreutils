@@ -5,11 +5,12 @@
 
 use clap::{Arg, ArgAction, Command};
 use std::ffi::{OsStr, OsString};
-use std::io::{Write as _, stdout};
+use std::io::Write as _;
 #[cfg(unix)]
 use uucore::display::print_verbatim;
-use uucore::error::{UResult, UUsageError};
+use uucore::error::{UResult, USimpleError, UUsageError};
 use uucore::format_usage;
+use uucore::inproc::stdout;
 use uucore::line_ending::LineEnding;
 
 use uucore::translate;
@@ -163,6 +164,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         .cloned()
         .collect();
 
+    let mut out = stdout();
     for path in &dirnames {
         let result = dirname_string_manipulation(path.as_os_str());
 
@@ -175,15 +177,27 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         #[cfg(not(unix))]
         {
             // On non-Unix, fall back to lossy conversion
-            if let Ok(s) = std::str::from_utf8(result) {
-                write!(stdout(), "{s}")?;
+            let res = if let Ok(s) = std::str::from_utf8(result) {
+                write!(out, "{s}")
             } else {
                 // Fallback for non-UTF-8 paths on non-Unix systems
-                write!(stdout(), ".")?;
+                write!(out, ".")
+            };
+            if let Err(err) = res.and_then(|()| write!(out, "{line_ending}")) {
+                if err.kind() == std::io::ErrorKind::BrokenPipe {
+                    return Err(USimpleError::new(141, String::new()));
+                }
+                return Err(err.into());
             }
         }
-
-        write!(stdout(), "{line_ending}")?;
+        #[cfg(unix)]
+        write!(out, "{line_ending}")?;
+    }
+    if let Err(err) = out.flush() {
+        if err.kind() == std::io::ErrorKind::BrokenPipe {
+            return Err(USimpleError::new(141, String::new()));
+        }
+        return Err(err.into());
     }
 
     Ok(())

@@ -8,11 +8,12 @@
 use clap::builder::ValueParser;
 use clap::{Arg, ArgAction, Command};
 use std::ffi::OsString;
-use std::io::{Write, stdout};
+use std::io::Write;
 use std::path::{PathBuf, is_separator};
 use uucore::display::Quotable;
-use uucore::error::{UResult, UUsageError};
+use uucore::error::{UResult, USimpleError, UUsageError};
 use uucore::format_usage;
+use uucore::inproc::stdout;
 use uucore::line_ending::LineEnding;
 
 use uucore::translate;
@@ -65,10 +66,24 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     // Main Program Processing
     //
 
+    let mut out = stdout();
     for path in name_args {
-        let mut out = stdout();
-        out.write_all(&basename(path, &suffix)?)?;
-        write!(out, "{line_ending}")?;
+        let base = basename(path, &suffix)?;
+        if let Err(err) = out
+            .write_all(&base)
+            .and_then(|()| write!(out, "{line_ending}"))
+        {
+            if err.kind() == std::io::ErrorKind::BrokenPipe {
+                return Err(USimpleError::new(141, String::new()));
+            }
+            return Err(err.into());
+        }
+    }
+    if let Err(err) = out.flush() {
+        if err.kind() == std::io::ErrorKind::BrokenPipe {
+            return Err(USimpleError::new(141, String::new()));
+        }
+        return Err(err.into());
     }
 
     Ok(())

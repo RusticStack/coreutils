@@ -13,7 +13,6 @@ use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 use std::num::TryFromIntError;
 #[cfg(unix)]
 use std::os::fd::AsFd;
-#[cfg(windows)]
 use std::path::Path;
 use std::path::PathBuf;
 use uucore::diagnostics::OptionValue;
@@ -215,7 +214,7 @@ fn wrap_in_stdout_error(err: io::Error) -> io::Error {
 // zero-copy fast-path
 #[cfg(any(target_os = "linux", target_os = "android"))]
 fn print_n_bytes(input: impl AsFd, n: u64) -> io::Result<u64> {
-    let out = io::stdout();
+    let out = uucore::inproc::stdout();
     uucore::pipes::send_n_bytes(input, &out, n).map_err(wrap_in_stdout_error)
 }
 
@@ -225,7 +224,7 @@ fn print_n_bytes(input: impl Read, n: u64) -> io::Result<u64> {
     let mut reader = input.take(n);
 
     // Write those bytes to `stdout`.
-    let stdout = io::stdout();
+    let stdout = uucore::inproc::stdout();
     let mut stdout = stdout.lock();
 
     let bytes_written = io::copy(&mut reader, &mut stdout).map_err(wrap_in_stdout_error)?;
@@ -241,7 +240,7 @@ fn print_n_lines(input: &mut impl io::BufRead, n: u64, separator: u8) -> io::Res
     let mut reader = take_lines(input, n, separator);
 
     // Write those bytes to `stdout`.
-    let stdout = io::stdout();
+    let stdout = uucore::inproc::stdout();
     let stdout = stdout.lock();
     let mut writer = BufWriter::with_capacity(BUF_SIZE, stdout);
 
@@ -258,7 +257,7 @@ fn print_n_lines(input: &mut impl io::BufRead, n: u64, separator: u8) -> io::Res
 fn print_but_last_n_bytes(mut input: impl Read, n: u64) -> io::Result<u64> {
     let mut bytes_written: u64 = 0;
     if let Ok(n) = usize::try_from(n) {
-        let stdout = io::stdout();
+        let stdout = uucore::inproc::stdout();
         let mut stdout = stdout.lock();
 
         bytes_written = copy_all_but_n_bytes(&mut input, &mut stdout, n)
@@ -275,7 +274,7 @@ fn print_but_last_n_bytes(mut input: impl Read, n: u64) -> io::Result<u64> {
 }
 
 fn print_but_last_n_lines(mut input: impl Read, n: u64, separator: u8) -> io::Result<u64> {
-    let stdout = io::stdout();
+    let stdout = uucore::inproc::stdout();
     let mut stdout = stdout.lock();
     if n == 0 {
         return io::copy(&mut input, &mut stdout).map_err(wrap_in_stdout_error);
@@ -447,10 +446,10 @@ fn head_file(input: &mut File, options: &HeadOptions) -> io::Result<u64> {
 
 #[allow(clippy::cognitive_complexity)]
 fn uu_head(options: &HeadOptions) -> UResult<()> {
-    let mut stdout = io::stdout().lock();
+    let mut stdout = uucore::inproc::stdout().lock();
     let mut first = true;
     for file in &options.files {
-        let res = if file == "-" {
+        let res: io::Result<()> = if file == "-" {
             if (options.files.len() > 1 && !options.quiet) || options.verbose {
                 if !first {
                     writeln!(stdout)?;
@@ -458,7 +457,7 @@ fn uu_head(options: &HeadOptions) -> UResult<()> {
                 let name = locale_aware_shell_escape(translate!("head-name-stdin"));
                 writeln!(stdout, "==> {name} <==")?;
             }
-            let stdin = io::stdin();
+            let stdin = uucore::inproc::stdin();
 
             #[cfg(unix)]
             {
@@ -513,13 +512,14 @@ fn uu_head(options: &HeadOptions) -> UResult<()> {
                 Ok(())
             };
 
-            let mut file_handle = match File::open(file) {
+            let resolved = uucore::inproc::resolve(Path::new(file));
+            let mut file_handle = match File::open(&resolved) {
                 Ok(f) => f,
                 Err(err) => {
                     #[cfg(windows)]
                     // On Windows, `File::open` on a directory fails with "Permission denied".
                     if err.kind() == io::ErrorKind::PermissionDenied
-                        && Path::new(file).metadata().is_ok_and(|m| m.is_dir())
+                        && resolved.metadata().is_ok_and(|m| m.is_dir())
                     {
                         // We need to print the header, as we have an existing directory
                         print_header()?;
@@ -563,6 +563,9 @@ fn uu_head(options: &HeadOptions) -> UResult<()> {
             Ok(())
         };
         if let Err(err) = res {
+            if err.kind() == io::ErrorKind::BrokenPipe {
+                return Err(USimpleError::new(141, String::new()));
+            }
             let name = if file == "-" {
                 "standard input".into()
             } else {
