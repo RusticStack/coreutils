@@ -182,10 +182,13 @@ pub struct SimdPolicy {
 }
 
 impl SimdPolicy {
-    /// Get the global SIMD policy (cached)
+    /// Get the SIMD policy
     ///
     /// This checks both hardware capabilities and the `GLIBC_TUNABLES` environment
-    /// variable. The result is cached for the lifetime of the process.
+    /// variable. The CPU features are detected once per process. In a normal process the
+    /// whole policy is cached with them (borrowed); inside a host that runs utilities in its
+    /// own process (see [`crate::inproc`]) `GLIBC_TUNABLES` is the command's own and differs
+    /// from call to call, so the policy is built again from the cached CPU features (owned).
     ///
     /// # Examples
     ///
@@ -199,9 +202,12 @@ impl SimdPolicy {
     ///     println!("SIMD disabled by: {:?}", policy.disabled_features());
     /// }
     /// ```
-    pub fn detect() -> &'static Self {
+    pub fn detect() -> std::borrow::Cow<'static, Self> {
         static POLICY: OnceLock<SimdPolicy> = OnceLock::new();
-        POLICY.get_or_init(Self::detect_impl)
+        if crate::inproc::active() {
+            return std::borrow::Cow::Owned(Self::detect_impl());
+        }
+        std::borrow::Cow::Borrowed(POLICY.get_or_init(Self::detect_impl))
     }
 
     fn detect_impl() -> Self {
@@ -439,11 +445,50 @@ mod tests {
         let _ = policy.allows_simd();
     }
 
+    /// Inside a host the policy follows each command's own `GLIBC_TUNABLES`: a value set for
+    /// one call must not stay for the next (only the CPU features are cached).
+    #[cfg(windows)]
+    #[test]
+    fn test_simd_policy_follows_each_contexts_tunables() {
+        use crate::inproc::{CancelToken, Invocation, run};
+        use std::os::windows::io::AsRawHandle as _;
+
+        // A handle for the context's streams; nothing is read or written through it.
+        let file = std::fs::File::open(std::env::current_exe().unwrap()).unwrap();
+        let handle = file.as_raw_handle();
+        let disabled_in = |tunables: &str| {
+            let inv = Invocation {
+                util_name: "wc",
+                stdin: handle,
+                stdout: handle,
+                stderr: handle,
+                env: vec![("GLIBC_TUNABLES".into(), tunables.into())],
+                cwd: std::env::temp_dir(),
+                cancel: CancelToken::new(),
+            };
+            let disabled = std::cell::RefCell::new(Vec::new());
+            run(inv, || {
+                *disabled.borrow_mut() = SimdPolicy::detect().disabled_features();
+                0
+            });
+            disabled.into_inner()
+        };
+        let first = disabled_in("glibc.cpu.hwcaps=-AVX2,-SSE2");
+        assert_eq!(first, vec![HardwareFeature::Avx2, HardwareFeature::Sse2]);
+        assert!(disabled_in("").is_empty());
+        assert_eq!(disabled_in("glibc.cpu.hwcaps=-AVX2"), vec![HardwareFeature::Avx2]);
+        // Outside a context nothing is read from the command's environment.
+        assert!(matches!(SimdPolicy::detect(), std::borrow::Cow::Borrowed(_)));
+    }
+
     #[test]
     fn test_simd_policy_caching() {
         let policy1 = SimdPolicy::detect();
         let policy2 = SimdPolicy::detect();
-        // Should be same instance (pointer equality)
-        assert!(std::ptr::eq(policy1, policy2));
+        // Should be same instance (pointer equality): borrowed from the cache
+        assert!(matches!(
+            (&policy1, &policy2),
+            (std::borrow::Cow::Borrowed(a), std::borrow::Cow::Borrowed(b)) if std::ptr::eq(*a, *b)
+        ));
     }
 }

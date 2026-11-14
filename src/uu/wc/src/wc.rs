@@ -974,7 +974,7 @@ fn wc(inputs: &Inputs, settings: &Settings) -> UResult<()> {
 
     if settings.debug {
         let policy = SimdPolicy::detect();
-        let features = wc_simd_features(policy);
+        let features = wc_simd_features(&policy);
 
         let enabled: Vec<&'static str> = features
             .enabled

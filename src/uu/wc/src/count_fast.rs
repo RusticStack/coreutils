@@ -180,7 +180,7 @@ pub(crate) fn count_bytes_chars_and_lines_fast<
     let mut total = WordCount::default();
     let buf: &mut [u8] = &mut AlignedBuffer::default().data;
     let policy = SimdPolicy::detect();
-    let simd_allowed = wc_simd_allowed(policy);
+    let simd_allowed = wc_simd_allowed(&policy);
     loop {
         match handle.read(buf) {
             Ok(0) => return (total, None),
