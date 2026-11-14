@@ -10,7 +10,7 @@
 //! method to get an iterator over lines of a file-like object.
 
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, StdinLock};
+use std::io::{BufRead, BufReader, Read};
 
 #[cfg(unix)]
 use std::os::fd::AsFd;
@@ -34,8 +34,20 @@ pub trait WordCountable: Read {
     fn buffered(self) -> Self::Buffered;
 }
 
-#[cfg(not(target_os = "wasi"))]
-impl WordCountable for StdinLock<'_> {
+#[cfg(all(not(target_os = "wasi"), windows))]
+impl WordCountable for uucore::inproc::StdinLock {
+    type Buffered = Self;
+
+    fn buffered(self) -> Self::Buffered {
+        self
+    }
+    fn inner_file(&mut self) -> Option<&mut File> {
+        None
+    }
+}
+
+#[cfg(all(not(target_os = "wasi"), not(windows)))]
+impl WordCountable for std::io::StdinLock<'_> {
     type Buffered = Self;
 
     fn buffered(self) -> Self::Buffered {

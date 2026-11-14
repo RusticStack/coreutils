@@ -55,7 +55,9 @@ pub fn main(args: TokenStream, stream: TokenStream) -> TokenStream {
             // A failure after the reader of stdout went away is a SIGPIPE death on Unix:
             // exit 141 without a message (Skua patch).
             if result.is_err() || uucore::error::get_exit_code() != 0 {
-                uucore::error::exit_if_stdout_pipe_closed();
+                if uucore::error::stdout_pipe_closed() {
+                    return 141;
+                }
             }
             match result {
                 Ok(()) => uucore::error::get_exit_code(),
@@ -65,7 +67,7 @@ pub fn main(args: TokenStream, stream: TokenStream) -> TokenStream {
                         uucore::show_error!("{s}");
                     }
                     if e.usage() {
-                        use std::io::{stderr, Write as _};
+                        use std::io::Write as _; use uucore::inproc::stderr;
                         let _ = writeln!(stderr(),"Try '{} --help' for more information.", uucore::execution_phrase());
                     }
                     e.code()

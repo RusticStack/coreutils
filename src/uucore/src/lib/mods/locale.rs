@@ -562,7 +562,7 @@ pub fn is_integer_literal(s: &str) -> bool {
 
 /// Function to detect system locale from environment variables
 fn detect_system_locale() -> Result<LanguageIdentifier, LocalizationError> {
-    let locale_str = std::env::var("LANG")
+    let locale_str = crate::inproc::var("LANG")
         .unwrap_or_else(|_| DEFAULT_LOCALE.to_string())
         .split('.')
         .next()
@@ -614,8 +614,14 @@ pub fn setup_localization(p: &str) -> Result<(), LocalizationError> {
     // Avoid duplicated and high-cost localizer setup
     thread_local! {
         static LOCALIZED_UTIL: RefCell<Option<String>> = const { RefCell::new(None) };
+        // The LANG the thread's localizer was built for (a host runs utilities with different
+        // environments on one thread; a process has one).
+        static LOCALIZED_LANG: RefCell<Option<String>> = const { RefCell::new(None) };
     }
-    if LOCALIZED_UTIL.with_borrow(|util| util.as_deref() == Some(p)) {
+    let lang = crate::inproc::var("LANG").ok();
+    if LOCALIZED_UTIL.with_borrow(|util| util.as_deref() == Some(p))
+        && LOCALIZED_LANG.with_borrow(|l| *l == lang)
+    {
         return Ok(());
     }
     let locales_dir = get_locales_dir(p);
@@ -663,6 +669,7 @@ pub fn setup_localization(p: &str) -> Result<(), LocalizationError> {
         set_localizer(localizer);
     }
     LOCALIZED_UTIL.with_borrow_mut(|util| *util = Some(p.to_string()));
+    LOCALIZED_LANG.with_borrow_mut(|l| *l = lang);
     Ok(())
 }
 

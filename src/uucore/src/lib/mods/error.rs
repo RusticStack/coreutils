@@ -66,6 +66,9 @@ static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 /// Get the last exit code set with [`set_exit_code`].
 /// The default value is `0`.
 pub fn get_exit_code() -> i32 {
+    if let Some(code) = crate::inproc::exit_code() {
+        return code;
+    }
     EXIT_CODE.load(Ordering::SeqCst)
 }
 
@@ -89,6 +92,9 @@ pub fn get_exit_code() -> i32 {
 /// }
 /// ```
 pub fn set_exit_code(code: i32) {
+    if crate::inproc::set_exit_code(code) {
+        return;
+    }
     EXIT_CODE.store(code, Ordering::SeqCst);
 }
 
@@ -99,6 +105,15 @@ pub fn set_exit_code(code: i32) {
 /// `ERROR_BROKEN_PIPE`, and a utility would print "Broken pipe" and often carry on. Calling this
 /// before any diagnostic makes `seq 100000 | head -1` quiet on Windows too. Does nothing on other
 /// platforms. (Skua patch.)
+/// Whether standard output is a pipe whose reader has gone (see [`exit_if_stdout_pipe_closed`]); the
+/// answer for callers that can return a status instead of exiting. Always `false` off Windows.
+pub fn stdout_pipe_closed() -> bool {
+    #[cfg(windows)]
+    return windows_pipe::stdout_pipe_closed();
+    #[cfg(not(windows))]
+    false
+}
+
 pub fn exit_if_stdout_pipe_closed() {
     #[cfg(windows)]
     if windows_pipe::stdout_pipe_closed() {
@@ -130,6 +145,9 @@ mod windows_pipe {
     /// block and the byte count are leaked (32 bytes, only on the error path) so that a write
     /// that completes later never touches freed memory.
     pub(super) fn stdout_pipe_closed() -> bool {
+        if let Some(closed) = crate::inproc::stdout_is_closed_pipe() {
+            return closed;
+        }
         let handle = std::io::stdout().as_raw_handle();
         if handle.is_null() {
             return false;
@@ -162,7 +180,7 @@ mod windows_pipe {
 pub fn print_diagnostic(prefix: &str, msg: std::fmt::Arguments<'_>) {
     exit_if_stdout_pipe_closed();
     let line = format!("{}: {prefix}{msg}\n", crate::util_name());
-    let _ = std::io::stderr().write_all(line.as_bytes());
+    let _ = crate::inproc::stderr().write_all(line.as_bytes());
 }
 
 /// Result type that should be returned by all utils.
@@ -809,6 +827,32 @@ impl From<i32> for Box<dyn UError> {
     }
 }
 
+/// `clap::Error::print`, for a utility that may run inside a host (Skua): clap writes to the
+/// process's stdout or stderr, so inside a host the text is rendered and written to the
+/// utility's own stream (colours only when forced, as clap would on a stream that is not a
+/// terminal).
+fn print_clap_error(error: &clap::Error) -> std::io::Result<()> {
+    if !crate::inproc::active() {
+        return error.print();
+    }
+    let forced = (crate::inproc::var_os("CLICOLOR_FORCE").is_some()
+        || crate::inproc::var_os("FORCE_COLOR").is_some())
+        && crate::inproc::var_os("NO_COLOR").is_none();
+    let rendered = error.render();
+    let text = if forced {
+        rendered.ansi().to_string()
+    } else {
+        rendered.to_string()
+    };
+    if error.use_stderr() {
+        crate::inproc::stderr().write_all(text.as_bytes())
+    } else {
+        let mut out = crate::inproc::stdout();
+        out.write_all(text.as_bytes())?;
+        out.flush()
+    }
+}
+
 /// A wrapper for `clap::Error` that implements [`UError`]
 ///
 /// Contains a custom error code. When `Display::fmt` is called on this struct
@@ -891,7 +935,7 @@ impl Display for ClapErrorWrapper {
         // Check if printing succeeds. For DisplayHelp and DisplayVersion,
         // error.print() writes to stdout, so we need to detect write failures
         // (e.g., when stdout is /dev/full).
-        if let Err(print_fail) = self.error.print() {
+        if let Err(print_fail) = print_clap_error(&self.error) {
             // Mark that printing failed so code() can return the appropriate exit code
             self.print_failed.set(true);
             // Try to display this error to stderr, but ignore if that fails too

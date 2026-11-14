@@ -12,11 +12,14 @@ use clap::{Arg, ArgAction, Command};
 use memchr::memchr2;
 use std::ffi::OsString;
 use std::fs::{File, metadata};
-use std::io::{self, BufWriter, ErrorKind, IsTerminal, Read, Write};
+#[cfg(not(windows))]
+use std::io::IsTerminal as _;
+use std::io::{self, BufWriter, ErrorKind, Read, Write};
 #[cfg(any(unix, target_os = "wasi"))]
 use std::os::fd::AsFd;
 #[cfg(unix)]
 use std::os::unix::fs::FileTypeExt;
+use std::path::Path;
 use uucore::display::Quotable;
 use uucore::error::{UResult, strip_errno};
 use uucore::translate;
@@ -378,9 +381,9 @@ fn cat_path(path: &OsString, options: &OutputOptions, state: &mut OutputState) -
             if uucore::signals::stdin_was_closed() {
                 return Err(io::Error::from(rustix::io::Errno::BADF).into());
             }
-            let stdin = io::stdin();
+            let stdin = uucore::inproc::stdin();
             let is_interactive = stdin.is_terminal();
-            if !is_safe_overwrite(&stdin, &io::stdout()) {
+            if !is_safe_overwrite(&stdin, &uucore::inproc::stdout()) {
                 return Err(CatError::OutputIsInput);
             }
             let mut handle = InputHandle {
@@ -393,8 +396,8 @@ fn cat_path(path: &OsString, options: &OutputOptions, state: &mut OutputState) -
         #[cfg(unix)]
         InputType::Socket => Err(CatError::NoSuchDeviceOrAddress),
         _ => {
-            let file = File::open(path)?;
-            if !is_safe_overwrite(&file, &io::stdout()) {
+            let file = File::open(uucore::inproc::resolve(Path::new(path)))?;
+            if !is_safe_overwrite(&file, &uucore::inproc::stdout()) {
                 return Err(CatError::OutputIsInput);
             }
             let mut handle = InputHandle {
@@ -421,7 +424,11 @@ where
     for path in files {
         if let Err(err) = cat_path(path, options, &mut state) {
             if let CatError::Write(ref io_err) = err {
-                handle_broken_pipe(io_err);
+                if is_broken_pipe(io_err) {
+                    // Skua: bash reports a SIGPIPE death as 141, without a message. Returned, not
+                    // `exit`ed: no unwind needed in a host.
+                    return Err(uucore::error::USimpleError::new(141, String::new()));
+                }
                 error_messages.push(err.to_string());
                 break;
             }
@@ -429,7 +436,7 @@ where
         }
     }
     if state.skipped_carriage_return {
-        print!("\r");
+        let _ = uucore::inproc::stdout().write_all(b"\r");
     }
     if error_messages.is_empty() {
         return Ok(());
@@ -453,7 +460,7 @@ fn get_input_type(path: &OsString) -> CatResult<InputType> {
         return Ok(InputType::StdIn);
     }
 
-    let ft = match metadata(path) {
+    let ft = match metadata(uucore::inproc::resolve(Path::new(path))) {
         Ok(md) => md.file_type(),
         Err(e) => {
             if let Some(raw_error) = e.raw_os_error() {
@@ -491,7 +498,7 @@ fn get_input_type(path: &OsString) -> CatResult<InputType> {
 /// Writes handle to stdout with no configuration. This allows a
 /// simple memory copy.
 fn print_fast<R: FdReadable>(handle: &mut InputHandle<R>) -> CatResult<()> {
-    let stdout = io::stdout();
+    let stdout = uucore::inproc::stdout();
     #[cfg(any(target_os = "linux", target_os = "android"))]
     let mut stdout = stdout;
     // Try to use the splice() system call for faster writing. If it works, we're done.
@@ -508,7 +515,7 @@ fn print_fast<R: FdReadable>(handle: &mut InputHandle<R>) -> CatResult<()> {
 #[cfg_attr(any(target_os = "linux", target_os = "android"), inline(never))] // splice fast-path does not require this allocation
 fn print_unbuffered<R: FdReadable>(
     handle: &mut InputHandle<R>,
-    stdout: io::Stdout,
+    stdout: uucore::inproc::Stdout,
 ) -> CatResult<()> {
     #[cfg(any(unix, target_os = "wasi"))]
     let mut stdout = uucore::io::RawWriter(stdout); // use raw syscall to remove buffering
@@ -539,7 +546,7 @@ fn print_lines<R: FdReadable>(
     state: &mut OutputState,
 ) -> CatResult<()> {
     let mut in_buf = [0; 1024 * 31];
-    let stdout = io::stdout();
+    let stdout = uucore::inproc::stdout();
     let stdout = stdout.lock();
     // Add a 32K buffer for stdout - this greatly improves performance.
     let mut writer = BufWriter::with_capacity(32 * 1024, stdout);
@@ -729,11 +736,9 @@ fn write_end_of_line<W: Write>(
     Ok(())
 }
 
-fn handle_broken_pipe(error: &io::Error) {
+fn is_broken_pipe(error: &io::Error) -> bool {
     // SIGPIPE is not available on Windows.
-    if cfg!(windows) && error.kind() == ErrorKind::BrokenPipe {
-        uucore::inproc::exit(141); // Skua patch: 141, as bash reports a SIGPIPE death
-    }
+    cfg!(windows) && error.kind() == ErrorKind::BrokenPipe
 }
 
 #[cfg(test)]

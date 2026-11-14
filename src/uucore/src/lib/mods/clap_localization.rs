@@ -21,7 +21,8 @@ use clap::{ArgMatches, Command, Error};
 use std::error::Error as StdError;
 use std::ffi::OsString;
 
-use std::io::{Write as _, stderr};
+use crate::inproc::{stderr, stdout};
+use std::io::Write as _;
 
 /// Color enum for consistent styling
 #[derive(Debug, Clone, Copy)]
@@ -43,9 +44,11 @@ impl Color {
 
 /// Determine color choice based on environment variables
 fn get_color_choice() -> clap::ColorChoice {
-    if std::env::var("NO_COLOR").is_ok() {
+    if crate::inproc::var("NO_COLOR").is_ok() {
         clap::ColorChoice::Never
-    } else if std::env::var("CLICOLOR_FORCE").is_ok() || std::env::var("FORCE_COLOR").is_ok() {
+    } else if crate::inproc::var("CLICOLOR_FORCE").is_ok()
+        || crate::inproc::var("FORCE_COLOR").is_ok()
+    {
         clap::ColorChoice::Always
     } else {
         clap::ColorChoice::Auto
@@ -53,12 +56,12 @@ fn get_color_choice() -> clap::ColorChoice {
 }
 
 /// Generic helper to check if colors should be enabled for a given stream
-fn should_use_color_for_stream<S: std::io::IsTerminal>(stream: &S) -> bool {
+fn should_use_color_for_stream(is_terminal: bool) -> bool {
     match get_color_choice() {
         clap::ColorChoice::Always => true,
         clap::ColorChoice::Never => false,
         clap::ColorChoice::Auto => {
-            stream.is_terminal() && std::env::var("TERM").unwrap_or_default() != "dumb"
+            is_terminal && crate::inproc::var("TERM").unwrap_or_default() != "dumb"
         }
     }
 }
@@ -69,7 +72,7 @@ struct ColorManager(bool);
 impl ColorManager {
     /// Create a new [`ColorManager`] based on environment variables
     fn from_env() -> Self {
-        Self(should_use_color_for_stream(&stderr()))
+        Self(should_use_color_for_stream(stderr().is_terminal()))
     }
 
     /// Apply color to text if colors are enabled
@@ -136,7 +139,7 @@ impl<'a> ErrorFormatter<'a> {
 
     /// Handle help and version display
     fn handle_display_errors(&self, err: &Error) -> i32 {
-        print!("{}", err.render());
+        let _ = write!(stdout(), "{}", err.render());
         0
     }
 
@@ -214,7 +217,7 @@ impl<'a> ErrorFormatter<'a> {
                     Some(source) if err.kind() == ErrorKind::ValueValidation => {
                         let _ = writeln!(stderr(), "{error_msg}: {source}");
                     }
-                    _ => eprintln!("{error_msg}"),
+                    _ => drop(writeln!(stderr(), "{error_msg}")),
                 }
             }
 
@@ -289,7 +292,7 @@ impl<'a> ErrorFormatter<'a> {
                         }
                     });
             }
-            _ => eprint!("{}", err.render()),
+            _ => drop(write!(stderr(), "{}", err.render())),
         }
         exit_code
     }
@@ -552,7 +555,7 @@ pub fn configure_localized_command(mut cmd: Command) -> Command {
     cmd = cmd.color(color_choice);
 
     // For help output (stdout), we check stdout TTY status
-    let colors_enabled = should_use_color_for_stream(&std::io::stdout());
+    let colors_enabled = should_use_color_for_stream(stdout().is_terminal());
 
     cmd = cmd.help_template(crate::localized_help_template_with_colors(
         crate::util_name(),
@@ -647,7 +650,7 @@ mod tests {
             env::set_var("NO_COLOR", "1");
         }
         assert_eq!(get_color_choice(), clap::ColorChoice::Never);
-        assert!(!should_use_color_for_stream(&stderr()));
+        assert!(!should_use_color_for_stream(stderr().is_terminal()));
         let mgr = ColorManager::from_env();
         assert!(!mgr.0);
         unsafe {
@@ -659,7 +662,7 @@ mod tests {
             env::set_var("CLICOLOR_FORCE", "1");
         }
         assert_eq!(get_color_choice(), clap::ColorChoice::Always);
-        assert!(should_use_color_for_stream(&stderr()));
+        assert!(should_use_color_for_stream(stderr().is_terminal()));
         let mgr = ColorManager::from_env();
         assert!(mgr.0);
         unsafe {
@@ -671,7 +674,7 @@ mod tests {
             env::set_var("FORCE_COLOR", "1");
         }
         assert_eq!(get_color_choice(), clap::ColorChoice::Always);
-        assert!(should_use_color_for_stream(&stderr()));
+        assert!(should_use_color_for_stream(stderr().is_terminal()));
         unsafe {
             env::remove_var("FORCE_COLOR");
         }

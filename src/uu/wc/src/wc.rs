@@ -13,13 +13,11 @@ mod word_count;
 use std::{
     borrow::{Borrow, Cow},
     cmp::max,
-    env,
     ffi::{OsStr, OsString},
     fs::{self, File},
-    io::{self, Write, stderr},
+    io::{self, Write},
     iter,
     path::{Path, PathBuf},
-    sync::LazyLock,
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
@@ -722,7 +720,7 @@ fn word_count_from_reader_specialized<
     let mut reader = BufReadDecoder::new(reader.buffered());
     let mut in_word = false;
     let mut current_len = 0;
-    let is_posixly_correct = *IS_POSIXLY_CORRECT;
+    let is_posixly_correct = is_posixly_correct();
     while let Some(chunk) = reader.next_strict() {
         match chunk {
             Ok(text) => {
@@ -762,8 +760,8 @@ enum CountResult {
 /// return an error: ([`WordCount`], `Option<io::Error>`).
 fn word_count_from_input(input: &Input<'_>, settings: &Settings) -> CountResult {
     let (total, maybe_err) = match input {
-        Input::Stdin(_) => word_count_from_reader(io::stdin().lock(), settings),
-        Input::Path(path) => match File::open(path) {
+        Input::Stdin(_) => word_count_from_reader(uucore::inproc::stdin().lock(), settings),
+        Input::Path(path) => match File::open(uucore::inproc::resolve(path)) {
             Ok(f) => word_count_from_reader(f, settings),
             Err(err) => return CountResult::Failure(err),
         },
@@ -835,14 +833,14 @@ type InputIterItem<'a> = Result<Input<'a>, Box<dyn UError>>;
 /// To be used with `--files0-from=-`, this applies a filter on the results of [`files0_iter`] to
 /// translate '-' into the appropriate error.
 fn files0_iter_stdin<'a>() -> impl Iterator<Item = InputIterItem<'a>> {
-    files0_iter(io::stdin().lock(), STDIN_REPR.into()).map(|i| match i {
+    files0_iter(uucore::inproc::stdin().lock(), STDIN_REPR.into()).map(|i| match i {
         Ok(Input::Stdin(_)) => Err(WcError::StdinReprNotAllowed.into()),
         _ => i,
     })
 }
 
 fn files0_iter_file<'a>(path: &Path) -> UResult<impl Iterator<Item = InputIterItem<'a>>> {
-    match File::open(path) {
+    match File::open(uucore::inproc::resolve(path)) {
         Ok(f) => Ok(files0_iter(f, path.into())),
         Err(e) => Err(e.map_err_context(|| {
             translate!("wc-error-cannot-open-for-reading",
@@ -996,22 +994,26 @@ fn wc(inputs: &Inputs, settings: &Settings) -> UResult<()> {
         let runtime_disabled = !features.disabled_runtime.is_empty();
 
         if enabled_empty && !runtime_disabled {
-            let _ = writeln!(stderr(), "{}", translate!("wc-debug-hw-unavailable"));
+            let _ = writeln!(
+                uucore::inproc::stderr(),
+                "{}",
+                translate!("wc-debug-hw-unavailable")
+            );
         } else if runtime_disabled {
             let _ = writeln!(
-                stderr(),
+                uucore::inproc::stderr(),
                 "{}",
                 translate!("wc-debug-hw-disabled-glibc", "features" => disabled.join(", "))
             );
         } else if !enabled_empty && disabled_empty {
             let _ = writeln!(
-                stderr(),
+                uucore::inproc::stderr(),
                 "{}",
                 translate!("wc-debug-hw-using", "features" => enabled.join(", "))
             );
         } else {
             let _ = writeln!(
-                stderr(),
+                uucore::inproc::stderr(),
                 "{}",
                 translate!(
                     "wc-debug-hw-limited-glibc",
@@ -1057,7 +1059,7 @@ fn wc(inputs: &Inputs, settings: &Settings) -> UResult<()> {
         }
         // Print deferred error after stats to match GNU wc output order
         if let Some(err) = deferred_error {
-            let _ = io::stdout().flush();
+            let _ = uucore::inproc::stdout().flush();
             show!(err);
         }
     }
@@ -1081,7 +1083,7 @@ fn print_stats(
     title: Option<&OsStr>,
     number_width: usize,
 ) -> io::Result<()> {
-    let mut stdout = io::stdout().lock();
+    let mut stdout = uucore::inproc::stdout().lock();
 
     let maybe_cols = [
         (settings.show_lines, result.lines),
@@ -1104,5 +1106,7 @@ fn print_stats(
     writeln!(stdout)
 }
 
-static IS_POSIXLY_CORRECT: LazyLock<bool> =
-    LazyLock::new(|| env::var_os("POSIXLY_CORRECT").is_some());
+/// Read per call: a host runs utilities with different environments in one process.
+fn is_posixly_correct() -> bool {
+    uucore::inproc::var_os("POSIXLY_CORRECT").is_some()
+}

@@ -324,16 +324,13 @@ pub fn format_usage(s: &str) -> String {
 ///     .help_template(localized_help_template("myutil"));
 /// ```
 pub fn localized_help_template(util_name: &str) -> clap::builder::StyledStr {
-    use std::io::IsTerminal;
-
     // Determine if colors should be enabled - same logic as configure_localized_command
-    let colors_enabled = if std::env::var("NO_COLOR").is_ok() {
+    let colors_enabled = if inproc::var("NO_COLOR").is_ok() {
         false
-    } else if std::env::var("CLICOLOR_FORCE").is_ok() || std::env::var("FORCE_COLOR").is_ok() {
+    } else if inproc::var("CLICOLOR_FORCE").is_ok() || inproc::var("FORCE_COLOR").is_ok() {
         true
     } else {
-        IsTerminal::is_terminal(&std::io::stdout())
-            && std::env::var("TERM").unwrap_or_default() != "dumb"
+        inproc::stdout().is_terminal() && inproc::var("TERM").unwrap_or_default() != "dumb"
     };
 
     localized_help_template_with_colors(util_name, colors_enabled)
@@ -424,7 +421,7 @@ static UTIL_NAME: LazyLock<String> = LazyLock::new(|| {
 
 /// Derive the utility name.
 pub fn util_name() -> &'static str {
-    if let Some(name) = crate::mods::inproc::name_override() {
+    if let Some(name) = inproc::name_override() {
         return name;
     }
     &UTIL_NAME
@@ -447,7 +444,7 @@ static EXECUTION_PHRASE: LazyLock<String> = LazyLock::new(|| {
 
 /// Derive the complete execution phrase for "usage".
 pub fn execution_phrase() -> &'static str {
-    if let Some(name) = crate::mods::inproc::name_override() {
+    if let Some(name) = inproc::name_override() {
         return name;
     }
     &EXECUTION_PHRASE
