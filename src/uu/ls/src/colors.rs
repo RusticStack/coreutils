@@ -462,10 +462,11 @@ impl<'a> StyleManager<'a> {
     }
 
     #[cfg(not(unix))]
-    fn indicator_for_file(&self, _path: &PathData) -> Option<Indicator> {
+    #[cfg_attr(not(windows), allow(unused_variables))]
+    fn indicator_for_file(&self, path: &PathData) -> Option<Indicator> {
         // Skua: executables (as Git Bash decides them) get the `ex` colour on Windows.
         #[cfg(windows)]
-        if self.has_indicator_style(Indicator::ExecutableFile) && _path.is_executable_file() {
+        if self.has_indicator_style(Indicator::ExecutableFile) && path.is_executable_file() {
             return Some(Indicator::ExecutableFile);
         }
         if self.has_indicator_style(Indicator::RegularFile) {

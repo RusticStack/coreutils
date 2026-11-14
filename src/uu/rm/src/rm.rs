@@ -78,7 +78,6 @@ fn shown_path(path: &Path) -> PathBuf {
 }
 
 /// Helper function to print verbose message for removed file
-
 fn verbose_removed_file(path: &Path, options: &Options) -> UResult<()> {
     if options.verbose {
         write_verbose_line(&translate!(
@@ -138,6 +137,10 @@ fn remove_dir_clearing_read_only(path: &Path) -> io::Result<()> {
     if let Ok(md) = fs::symlink_metadata(path) {
         let mut perms = md.permissions();
         if md.is_dir() && perms.readonly() {
+            #[expect(
+                clippy::permissions_set_readonly_false,
+                reason = "Windows: clears the read-only attribute"
+            )]
             perms.set_readonly(false);
             fs::set_permissions(path, perms)?;
         }

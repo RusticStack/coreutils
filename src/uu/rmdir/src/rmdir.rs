@@ -144,6 +144,10 @@ fn remove_dir_clearing_read_only(path: &Path) -> io::Result<()> {
         && md.permissions().readonly()
     {
         let mut perms = md.permissions();
+        #[expect(
+            clippy::permissions_set_readonly_false,
+            reason = "Windows: clears the read-only attribute"
+        )]
         perms.set_readonly(false);
         std::fs::set_permissions(path, perms.clone())?;
         let retry = remove_dir(path);

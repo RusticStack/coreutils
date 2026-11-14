@@ -952,7 +952,7 @@ impl<'a> PathData<'a> {
     /// or `.lnk` name, or `#!`/`MZ` contents), for `-F` (`*`) and the `ex` colour.
     #[cfg(windows)]
     pub(crate) fn is_executable_file(&self) -> bool {
-        self.file_type().is_some_and(|t| t.is_file())
+        self.file_type().is_some_and(FileType::is_file)
             && self
                 .metadata()
                 .is_some_and(|md| uucore::fs::msys::mode(md, self.path()) & 0o111 != 0)
