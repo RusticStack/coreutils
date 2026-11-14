@@ -11,7 +11,9 @@
 //     utility's own streams when one is;
 //   * [`var_os`], [`var`], [`current_dir`], [`resolve`]: the request's environment and directory;
 //   * [`exit`]: `std::process::exit`, or an unwind to [`run`] inside a host (needs `panic =
-//     "unwind"` in the host);
+//     "unwind"` in the host). Utilities hosted in a process return a status instead wherever
+//     they can: cancelling a run never unwinds (its stream calls fail with [`Cancelled`]), and
+//     a broken pipe is reported by the status;
 //   * `util_name()`, `execution_phrase()`, `get/set_exit_code()` follow the context.
 // Without a context (a utility running as its own program) every function is the std one.
 
@@ -174,35 +176,77 @@ mod imp {
 
     // -- the thread-local context ---------------------------------------------------------
 
+    /// What a stream call returns once the run has been cancelled (see [`CancelToken`]): the
+    /// payload of an `io::Error` of kind `Other`. Never `Interrupted`: `write_all` and
+    /// `read_to_end` retry that kind forever.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Cancelled;
+
+    impl std::fmt::Display for Cancelled {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("cancelled")
+        }
+    }
+
+    impl std::error::Error for Cancelled {}
+
+    /// Whether `error` is the one a cancelled run's stream calls return.
+    pub fn is_cancelled_error(error: &io::Error) -> bool {
+        error
+            .get_ref()
+            .is_some_and(|inner| inner.downcast_ref::<Cancelled>().is_some())
+    }
+
     /// A raw handle used as a stream; never closed here.
     #[derive(Clone, Copy)]
-    struct RawFile(isize);
+    struct RawFile {
+        handle: isize,
+        /// The context's stdout (a failed write on it that says "reader gone" is remembered).
+        out: bool,
+    }
 
     impl RawFile {
+        const fn new(handle: isize) -> Self {
+            Self { handle, out: false }
+        }
         fn file(self) -> ManuallyDrop<File> {
             // SAFETY: the host keeps the handle open for the whole run; `ManuallyDrop` keeps this
             // wrapper from closing it.
-            ManuallyDrop::new(unsafe { File::from_raw_handle(self.0 as RawHandle) })
+            ManuallyDrop::new(unsafe { File::from_raw_handle(self.handle as RawHandle) })
         }
         const fn raw(self) -> RawHandle {
-            self.0 as RawHandle
+            self.handle as RawHandle
         }
     }
 
     impl Read for RawFile {
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-            stop_if_cancelled();
+            if cancelled() {
+                return Err(io::Error::other(Cancelled));
+            }
             let result = (&*self.file()).read(buf);
-            stop_if_cancelled();
+            if cancelled() {
+                return Err(io::Error::other(Cancelled));
+            }
             result
         }
     }
 
     impl Write for RawFile {
         fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-            stop_if_cancelled();
+            if cancelled() {
+                return Err(io::Error::other(Cancelled));
+            }
             let result = (&*self.file()).write(buf);
-            stop_if_cancelled();
+            if cancelled() {
+                return Err(io::Error::other(Cancelled));
+            }
+            if self.out
+                && let Err(error) = &result
+                && error.kind() == io::ErrorKind::BrokenPipe
+            {
+                STDOUT_BROKEN.with(|b| b.set(true));
+            }
             result
         }
         fn flush(&mut self) -> io::Result<()> {
@@ -220,6 +264,11 @@ mod imp {
         static ENV: RefCell<Vec<(String, String)>> = const { RefCell::new(Vec::new()) };
         static CWD: RefCell<PathBuf> = RefCell::new(PathBuf::new());
         static CANCEL: RefCell<Option<Arc<CancelToken>>> = const { RefCell::new(None) };
+        /// A write to the context's stdout failed because its reader had gone.
+        static STDOUT_BROKEN: Cell<bool> = const { Cell::new(false) };
+        /// A diagnostic was not printed because stdout's reader had gone (a child would have
+        /// exited 141, quietly, at that point).
+        static PIPE_CLOSED_NOTED: Cell<bool> = const { Cell::new(false) };
     }
 
     /// Whether a host is running a utility on this thread.
@@ -246,23 +295,31 @@ mod imp {
         on
     }
 
-    fn stop_if_cancelled() {
-        let cancelled = CANCEL.with(|c| {
+    /// Whether this thread's run has been cancelled.
+    fn cancelled() -> bool {
+        CANCEL.with(|c| {
             c.borrow()
                 .as_ref()
                 .is_some_and(|token| token.is_cancelled())
-        });
-        if cancelled {
-            exit(130);
-        }
+        })
     }
 
     /// `std::process::exit`, or, inside a host, an unwind carrying [`ToolExit`] to [`run`].
+    ///
+    /// The unwind needs `panic = "unwind"` in the host. It must never be started from a
+    /// destructor or while panicking (a second unwind aborts the process), so utilities return
+    /// their status where they can and call this only from straight-line code.
     pub fn exit(code: i32) -> ! {
         if active() {
             std::panic::resume_unwind(Box::new(ToolExit(code)));
         }
         std::process::exit(code)
+    }
+
+    /// Remembers that a diagnostic was dropped because stdout's reader has gone: the run then
+    /// ends with status 141, as a child that exited at that point would have.
+    pub fn note_pipe_closed() {
+        PIPE_CLOSED_NOTED.with(|b| b.set(true));
     }
 
     /// Installs the context, runs `f` (the utility's `uumain`), removes the context, returns the
@@ -283,9 +340,16 @@ mod imp {
         ACTIVE.with(|a| a.set(true));
         NAME.with(|n| n.set(Some(util_name)));
         EXIT_CODE.with(|c| c.set(0));
-        STDIN.with(|s| s.set(Some(RawFile(stdin as isize))));
-        STDOUT.with(|s| *s.borrow_mut() = Some(LineWriter::new(RawFile(stdout as isize))));
-        STDERR.with(|s| s.set(Some(RawFile(stderr as isize))));
+        STDIN.with(|s| s.set(Some(RawFile::new(stdin as isize))));
+        STDOUT.with(|s| {
+            *s.borrow_mut() = Some(LineWriter::new(RawFile {
+                handle: stdout as isize,
+                out: true,
+            }));
+        });
+        STDERR.with(|s| s.set(Some(RawFile::new(stderr as isize))));
+        STDOUT_BROKEN.with(|b| b.set(false));
+        PIPE_CLOSED_NOTED.with(|b| b.set(false));
         ENV.with(|e| *e.borrow_mut() = env);
         CWD.with(|c| *c.borrow_mut() = cwd);
         cancel.attach();
@@ -293,17 +357,16 @@ mod imp {
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(f));
         // What the utility left in the line buffer goes out first (errors: the reader may be
-        // gone). A cancelled run drops it instead: the reader may never read again and the
-        // thread must end now (the buffer, at most 1 KiB, is leaked).
+        // gone). The flush runs with the cancel flag still set, so a cancelled run's flush fails
+        // at once instead of blocking on a reader that may never read again.
         let out = STDOUT.with(|s| s.borrow_mut().take());
-        CANCEL.with(|c| *c.borrow_mut() = None);
         if let Some(mut out) = out {
-            if cancel.is_cancelled() {
-                std::mem::forget(out);
-            } else {
-                let _ = out.flush();
-            }
+            let _ = out.flush();
         }
+        let cancelled = cancel.is_cancelled();
+        let broken = STDOUT_BROKEN.with(Cell::get);
+        let noted = PIPE_CLOSED_NOTED.with(Cell::get);
+        CANCEL.with(|c| *c.borrow_mut() = None);
         cancel.detach();
         ACTIVE.with(|a| a.set(false));
         NAME.with(|n| n.set(None));
@@ -311,13 +374,20 @@ mod imp {
         STDERR.with(|s| s.set(None));
         ENV.with(|e| *e.borrow_mut() = Vec::new());
         CWD.with(|c| *c.borrow_mut() = PathBuf::new());
+        STDOUT_BROKEN.with(|b| b.set(false));
+        PIPE_CLOSED_NOTED.with(|b| b.set(false));
 
+        if cancelled {
+            return 130;
+        }
         match result {
+            _ if noted => 141,
             Ok(code) => code,
             Err(payload) => {
                 if let Some(exit) = payload.downcast_ref::<ToolExit>() {
                     exit.0
-                } else if is_broken_pipe_payload(payload.as_ref()) {
+                } else if broken {
+                    // A panic after a write to a closed pipe failed: the SIGPIPE death.
                     141
                 } else {
                     101
@@ -333,11 +403,6 @@ mod imp {
             .or_else(|| payload.downcast_ref::<&str>().copied())
     }
 
-    fn is_broken_pipe_payload(payload: &(dyn std::any::Any + Send)) -> bool {
-        payload_text(payload)
-            .is_some_and(|text| text.contains("BrokenPipe") || text.contains("Broken pipe"))
-    }
-
     /// Makes a panic inside a context report on the utility's stderr (as a program of its own
     /// would on its own) instead of the host's; other threads keep the previous hook.
     fn install_panic_hook() {
@@ -349,10 +414,8 @@ mod imp {
                     previous(info);
                     return;
                 }
-                if payload_text(info.payload())
-                    .is_some_and(|t| t.contains("BrokenPipe") || t.contains("Broken pipe"))
-                {
-                    return; // `run` turns this into 141, quietly
+                if STDOUT_BROKEN.with(Cell::get) || cancelled() {
+                    return; // `run` turns this into 141 (or 130), quietly
                 }
                 let location = info
                     .location()
@@ -396,17 +459,20 @@ mod imp {
             .map_err(std::env::VarError::NotUnicode)
     }
 
-    /// The path to hand to `std::fs`: a relative path is joined to the context's directory (the
-    /// process has one directory for all threads; the shell's is per command). Absolute paths,
-    /// rooted paths and `C:`-prefixed paths are returned as they are.
+    /// The path to hand to `std::fs`, made independent of the process's own directory (the
+    /// process has one for all threads; the shell's is per command): a relative path is joined
+    /// to the context's directory, and a rooted path without a drive (`\file`, `/file`) takes
+    /// the drive (or the UNC share) of the context's directory, as it would for a child started
+    /// there. Paths with a prefix (`C:\x`, `\server\share\x`, `\?\...`) are returned as they
+    /// are; `C:x` (relative to a drive's own directory) is left to the caller (the host does not
+    /// run such a request in the process).
     pub fn resolve(path: &(impl AsRef<Path> + ?Sized)) -> Cow<'_, Path> {
         let path = path.as_ref();
-        if !active()
-            || path.has_root()
-            || matches!(path.components().next(), Some(Component::Prefix(_)))
-        {
+        if !active() || matches!(path.components().next(), Some(Component::Prefix(_))) {
             return Cow::Borrowed(path);
         }
+        // `join` does both: a relative path is appended, a rooted one replaces everything but
+        // the prefix of the context's directory.
         CWD.with(|cwd| Cow::Owned(cwd.borrow().join(path)))
     }
 
@@ -474,12 +540,13 @@ mod imp {
     }
 
     /// Whether a zero-byte write fails because the pipe's reader has gone. The write passes an
-    /// `OVERLAPPED` block so that it is also valid on an overlapped pipe handle; the block and
-    /// the byte count are leaked (32 bytes, only on the error path) so that a write that
-    /// completes later never touches freed memory.
+    /// `OVERLAPPED` block so that it is also valid on an overlapped pipe handle. The block lives
+    /// on the heap and is freed after the call, except when the write is still pending (a write
+    /// that completes later must not touch freed memory): then, and only then, it is leaked.
     pub fn closed_pipe(handle: RawHandle) -> bool {
         const ERROR_BROKEN_PIPE: i32 = 109;
         const ERROR_NO_DATA: i32 = 232;
+        const ERROR_IO_PENDING: i32 = 997;
         #[link(name = "kernel32")]
         unsafe extern "system" {
             fn WriteFile(
@@ -493,24 +560,27 @@ mod imp {
         if handle.is_null() {
             return false;
         }
-        let overlapped: &mut [u64; 4] = Box::leak(Box::new([0; 4]));
-        let written: &mut u32 = Box::leak(Box::new(0));
-        // SAFETY: a zero-length write sends no data; `overlapped` and `written` are valid,
-        // zero-initialised and never freed.
+        // `OVERLAPPED` (32 bytes on x64) followed by the byte count.
+        let block: *mut ([u64; 4], u32) = Box::into_raw(Box::new(([0; 4], 0)));
+        // SAFETY: a zero-length write sends no data; `block` is valid and zero-initialised for
+        // the whole call (and for good if the call stays pending).
         let ok = unsafe {
             WriteFile(
                 handle.cast(),
                 std::ptr::null(),
                 0,
-                written,
-                overlapped.as_mut_ptr().cast(),
+                &raw mut (*block).1,
+                (&raw mut (*block).0).cast(),
             )
         };
-        ok == 0
-            && matches!(
-                io::Error::last_os_error().raw_os_error(),
-                Some(ERROR_BROKEN_PIPE | ERROR_NO_DATA)
-            )
+        let error = io::Error::last_os_error().raw_os_error();
+        if ok == 0 && error == Some(ERROR_IO_PENDING) {
+            // Left to the kernel, never freed.
+            return false;
+        }
+        // SAFETY: the call has completed, nothing refers to `block` any more.
+        drop(unsafe { Box::from_raw(block) });
+        ok == 0 && matches!(error, Some(ERROR_BROKEN_PIPE | ERROR_NO_DATA))
     }
 
     /// See [`stdin`].
@@ -537,7 +607,7 @@ mod imp {
 
     impl std::fmt::Debug for RawFile {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "RawFile({:#x})", self.0)
+            write!(f, "RawFile({:#x})", self.handle)
         }
     }
 
@@ -556,7 +626,7 @@ mod imp {
                     Ok(file) => {
                         StdinLock::Ctx(BufReader::with_capacity(64 * 1024, RawFileReader(file)))
                     }
-                    Err(_) => StdinLock::Ctx(BufReader::new(RawFileReader(RawFile(0)))),
+                    Err(_) => StdinLock::Ctx(BufReader::new(RawFileReader(RawFile::new(0)))),
                 },
             }
         }
@@ -712,7 +782,7 @@ mod imp {
                 Self::Std(s) => s.is_terminal(),
                 Self::Ctx => {
                     let raw = ctx_stdout_raw();
-                    !raw.is_null() && RawFile(raw as isize).file().is_terminal()
+                    !raw.is_null() && RawFile::new(raw as isize).file().is_terminal()
                 }
             }
         }
@@ -803,9 +873,12 @@ mod imp {
 mod tests {
     use super::*;
     use std::fs::File;
-    use std::io::Write as _;
-    use std::os::windows::io::AsRawHandle as _;
+    use std::io::{Read as _, Write as _};
+    use std::os::windows::io::{AsRawHandle as _, RawHandle};
     use std::path::{Path, PathBuf};
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::{Duration, Instant};
 
     fn temp(name: &str) -> (File, PathBuf) {
         let path =
@@ -814,11 +887,23 @@ mod tests {
     }
 
     fn invocation(util: &'static str, files: [&File; 3], env: &[(&str, &str)]) -> Invocation {
+        invocation_raw(
+            util,
+            [
+                files[0].as_raw_handle(),
+                files[1].as_raw_handle(),
+                files[2].as_raw_handle(),
+            ],
+            env,
+        )
+    }
+
+    fn invocation_raw(util: &'static str, raw: [RawHandle; 3], env: &[(&str, &str)]) -> Invocation {
         Invocation {
             util_name: util,
-            stdin: files[0].as_raw_handle(),
-            stdout: files[1].as_raw_handle(),
-            stderr: files[2].as_raw_handle(),
+            stdin: raw[0],
+            stdout: raw[1],
+            stderr: raw[2],
             env: env
                 .iter()
                 .map(|(k, v)| ((*k).into(), (*v).into()))
@@ -864,11 +949,15 @@ mod tests {
         let _ = std::fs::remove_file(p);
     }
 
+    /// Two utilities at once, each with its own exit code: both set theirs before either reads,
+    /// so a code that leaked from one thread to the other would show.
     #[test]
     fn two_utilities_run_at_once() {
-        let handles: Vec<_> = ["one", "two"]
+        let barrier = std::sync::Arc::new(Barrier::new(2));
+        let handles: Vec<_> = [("one", 3), ("two", 4)]
             .into_iter()
-            .map(|n| {
+            .map(|(n, expected)| {
+                let barrier = std::sync::Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     let (f, p) = temp(n);
                     let util: &'static str = if n == "one" { "cat" } else { "wc" };
@@ -877,19 +966,23 @@ mod tests {
                         for _ in 0..1000 {
                             writeln!(stdout(), "{}", crate::util_name()).unwrap();
                         }
-                        set_exit_code(if n == "one" { 3 } else { 4 });
+                        set_exit_code(expected);
+                        barrier.wait();
+                        for _ in 0..1000 {
+                            assert_eq!(crate::error::get_exit_code(), expected);
+                        }
                         crate::error::get_exit_code()
                     });
                     drop(f);
                     let text = std::fs::read_to_string(&p).unwrap();
                     let _ = std::fs::remove_file(p);
-                    (code, text, util)
+                    (code, expected, text, util)
                 })
             })
             .collect();
         for h in handles {
-            let (code, text, util) = h.join().unwrap();
-            assert!(code == 3 || code == 4);
+            let (code, expected, text, util) = h.join().unwrap();
+            assert_eq!(code, expected);
             assert_eq!(text.lines().count(), 1000);
             assert!(text.lines().all(|l| l == util));
         }
@@ -901,10 +994,213 @@ mod tests {
         let inv = invocation("cat", [&f, &f, &f], &[]);
         inv.cancel.cancel();
         let code = run(inv, || {
-            let _ = writeln!(stdout(), "never");
+            let error = writeln!(stdout(), "never").and_then(|()| stdout().flush());
+            assert!(error.is_err_and(|e| is_cancelled_error(&e)));
+            let mut buf = [0u8; 4];
+            let error = stdin().read(&mut buf);
+            assert!(error.is_err_and(|e| is_cancelled_error(&e)));
             0
         });
         assert_eq!(code, 130);
+        let _ = std::fs::remove_file(p);
+    }
+
+    /// Cancelling while output is still buffered must neither unwind nor abort: the buffered
+    /// writer's drop flushes into a cancelled stream, which fails quietly.
+    #[test]
+    fn cancel_with_buffered_output_does_not_unwind() {
+        let (f, p) = temp("d");
+        let inv = invocation("cat", [&f, &f, &f], &[]);
+        let token = std::sync::Arc::clone(&inv.cancel);
+        let code = run(inv, || {
+            let mut writer = std::io::BufWriter::with_capacity(32 * 1024, stdout().lock());
+            writer.write_all(b"pending").unwrap();
+            token.cancel();
+            // A read after the cancel fails; the writer is dropped by the error path.
+            let mut buf = [0u8; 1];
+            assert!(stdin().read(&mut buf).is_err());
+            drop(writer);
+            assert!(!std::thread::panicking());
+            0
+        });
+        assert_eq!(code, 130);
+        let _ = std::fs::remove_file(p);
+    }
+
+    /// An invocation moved to a thread of the test.
+    struct Raw(Invocation);
+    // SAFETY: the handles stay open until the end of the test (reader, writer, log).
+    unsafe impl Send for Raw {}
+
+    fn unfinished_within(timeout: Duration, f: impl FnOnce() -> i32 + Send + 'static) -> i32 {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(timeout).expect("the run did not end in time")
+    }
+
+    /// A utility blocked in a write to a pipe nobody reads, and one blocked in a read from a pipe
+    /// nobody writes, end at a cancel (the host cancels again every 10 ms until they do).
+    #[test]
+    fn cancel_unblocks_pipe_reads_and_writes() {
+        for writing in [true, false] {
+            let (reader, writer) = std::io::pipe().unwrap();
+            let (log, p) = temp(if writing { "w" } else { "r" });
+            let raw = if writing {
+                [log.as_raw_handle(), writer.as_raw_handle(), log.as_raw_handle()]
+            } else {
+                [reader.as_raw_handle(), log.as_raw_handle(), log.as_raw_handle()]
+            };
+            let inv = invocation_raw("cat", raw, &[]);
+            let token = std::sync::Arc::clone(&inv.cancel);
+            let started = Instant::now();
+            let done = std::sync::Arc::new(AtomicBool::new(false));
+            let canceller = {
+                let done = std::sync::Arc::clone(&done);
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(100));
+                    while !done.load(Ordering::Acquire) && started.elapsed() < Duration::from_secs(5) {
+                        token.cancel();
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                })
+            };
+            let inv = Raw(inv);
+            let code = unfinished_within(Duration::from_secs(10), move || {
+                let inv = inv;
+                run(inv.0, || {
+                    // Buffered like cat -n's writer, so the drop path is exercised too.
+                    let mut out = std::io::BufWriter::with_capacity(32 * 1024, stdout().lock());
+                    let chunk = vec![b'x'; 64 * 1024];
+                    if writing {
+                        loop {
+                            if out.write_all(&chunk).is_err() {
+                                break;
+                            }
+                        }
+                    } else {
+                        let mut buf = [0u8; 16];
+                        let _ = stdin().read(&mut buf);
+                    }
+                    0
+                })
+            });
+            done.store(true, Ordering::Release);
+            canceller.join().unwrap();
+            assert_eq!(code, 130, "writing: {writing}");
+            drop((reader, writer, log));
+            let _ = std::fs::remove_file(p);
+        }
+    }
+
+    /// A panic after a write to a closed pipe failed is the SIGPIPE death (141, quietly); any
+    /// other panic is 101.
+    #[test]
+    fn broken_pipe_panic_is_141_and_other_panics_101() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        let (log, p) = temp("e");
+        drop(reader);
+        let inv = invocation_raw(
+            "wc",
+            [log.as_raw_handle(), writer.as_raw_handle(), log.as_raw_handle()],
+            &[],
+        );
+        let code = run(inv, || {
+            let chunk = vec![b'x'; 8 * 1024];
+            let mut failed = false;
+            for _ in 0..4 {
+                failed |= stdout().write_all(&chunk).and_then(|()| stdout().flush()).is_err();
+            }
+            assert!(failed);
+            let result: Result<(), std::io::Error> = Err(std::io::Error::other("later"));
+            std::hint::black_box(result).unwrap();
+            0
+        });
+        assert_eq!(code, 141);
+        let inv = invocation("wc", [&log, &log, &log], &[]);
+        assert_eq!(run(inv, || panic!("not a pipe")), 101);
+        drop((writer, log));
+        let _ = std::fs::remove_file(p);
+    }
+
+    /// A diagnostic printed while stdout's reader is gone is dropped and the run ends 141, with no
+    /// unwind (what `print_diagnostic` did with `exit` before).
+    #[test]
+    fn diagnostic_with_a_closed_stdout_ends_141_without_unwinding() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        let (log, p) = temp("f");
+        drop(reader);
+        let inv = invocation_raw(
+            "wc",
+            [log.as_raw_handle(), writer.as_raw_handle(), log.as_raw_handle()],
+            &[],
+        );
+        let code = run(inv, || {
+            crate::error::print_diagnostic("", format_args!("a diagnostic"));
+            assert!(!std::thread::panicking());
+            set_exit_code(1);
+            1
+        });
+        assert_eq!(code, 141);
+        drop((writer, log));
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "");
+        let _ = std::fs::remove_file(p);
+        // With a reader that is there, the diagnostic is printed.
+        let (log, p) = temp("g");
+        let (reader, writer) = std::io::pipe().unwrap();
+        let inv = invocation_raw(
+            "wc",
+            [log.as_raw_handle(), writer.as_raw_handle(), log.as_raw_handle()],
+            &[],
+        );
+        let code = run(inv, || {
+            crate::error::print_diagnostic("", format_args!("shown"));
+            0
+        });
+        assert_eq!(code, 0);
+        drop((reader, writer, log));
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "wc: shown\n");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn closed_pipe_probe_is_exact_and_repeatable() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        for _ in 0..1000 {
+            assert!(!closed_pipe(writer.as_raw_handle()));
+        }
+        drop(reader);
+        for _ in 0..1000 {
+            assert!(closed_pipe(writer.as_raw_handle()));
+        }
+    }
+
+    #[test]
+    fn rooted_paths_take_the_drive_or_share_of_the_context_directory() {
+        let (f, p) = temp("h");
+        for (cwd, arg, want) in [
+            (r"D:\work\sub", r"\file.txt", r"D:\file.txt"),
+            (r"D:\work\sub", "/file.txt", r"D:\file.txt"),
+            (r"D:\work\sub", r"rel\x", r"D:\work\sub\rel\x"),
+            (r"D:\work\sub", r"C:\abs\x", r"C:\abs\x"),
+            (r"D:\work\sub", r"\\srv\share\x", r"\\srv\share\x"),
+            (r"\\srv\share\dir", r"\file.txt", r"\\srv\share\file.txt"),
+            (r"\\srv\share\dir", r"rel", r"\\srv\share\dir\rel"),
+            (r"\\?\D:\work", r"\file.txt", r"\\?\D:\file.txt"),
+        ] {
+            let mut inv = invocation("cat", [&f, &f, &f], &[]);
+            inv.cwd = PathBuf::from(cwd);
+            let out = std::sync::Mutex::new(PathBuf::new());
+            run(inv, || {
+                *out.lock().unwrap() = resolve(arg).into_owned();
+                0
+            });
+            assert_eq!(*out.lock().unwrap(), Path::new(want), "{cwd} + {arg}");
+        }
+        // Outside a context nothing changes.
+        assert_eq!(resolve(r"\file.txt").as_ref(), Path::new(r"\file.txt"));
+        drop(f);
         let _ = std::fs::remove_file(p);
     }
 }

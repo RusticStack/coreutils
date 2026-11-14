@@ -205,7 +205,7 @@ impl fmt::Display for QuotingStyle {
 /// stderr in case of an invalid value.
 pub fn quoting_style_from_env() -> Option<QuotingStyle> {
     // If variable is not set, return None quietly.
-    let style = std::env::var_os("QUOTING_STYLE")?;
+    let style = crate::inproc::var_os("QUOTING_STYLE")?;
 
     let Some(qs) = style.to_str().and_then(QuotingStyle::parse) else {
         // Variable is present but invalid, report an error.

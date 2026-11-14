@@ -220,7 +220,7 @@ fn extract_value<T: Default>(
                         // GNU stays silent about the ignored trailing bytes when
                         // POSIXLY_CORRECT is set. Only the presence of the variable
                         // matters, its value is irrelevant.
-                        if std::env::var_os("POSIXLY_CORRECT").is_none() {
+                        if crate::inproc::var_os("POSIXLY_CORRECT").is_none() {
                             show_warning!(
                                 "{rest}: character(s) following character constant have been ignored"
                             );

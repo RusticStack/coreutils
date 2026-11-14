@@ -40,10 +40,19 @@ fn encoding_from_name(enc: &str) -> Encoding {
 #[inline]
 pub fn locale_encoding() -> Encoding {
     static ENCODING: OnceLock<Encoding> = OnceLock::new();
-    *ENCODING.get_or_init(|| {
+    // Inside a host (a shell running the utility in its own process) the environment is the
+    // command's, not the process's, and differs from call to call: nothing is cached.
+    if crate::inproc::active() {
+        return detect_locale_encoding();
+    }
+    *ENCODING.get_or_init(detect_locale_encoding)
+}
+
+fn detect_locale_encoding() -> Encoding {
+    {
         let val = ["LC_ALL", "LC_CTYPE", "LANG"]
             .iter()
-            .find_map(|&k| std::env::var(k).ok().filter(|v| !v.is_empty()));
+            .find_map(|&k| crate::inproc::var(k).ok().filter(|v| !v.is_empty()));
         let s = match val.as_deref() {
             Some(s) if s != "C" && s != "POSIX" => s,
             // Explicit C/POSIX locale, or no locale set at all: the POSIX
@@ -61,7 +70,7 @@ pub fn locale_encoding() -> Encoding {
                 _ => Encoding::Utf8,
             }
         }
-    })
+    }
 }
 
 impl Encoding {

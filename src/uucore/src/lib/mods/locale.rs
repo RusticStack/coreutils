@@ -125,8 +125,16 @@ fn errors_message(
     id: &str,
     args: Option<&FluentArgs>,
 ) -> Option<String> {
-    ERRORS_BUNDLE.with(|cell| {
-        let bundle = cell.get_or_init(|| build_errors_bundle(locales)).as_ref()?;
+    ERRORS_BUNDLE.with_borrow_mut(|slot| {
+        // Keyed by the locales it was built for: a host runs utilities with different
+        // environments on one thread (a process has one).
+        if slot
+            .as_ref()
+            .is_none_or(|(built_for, _)| built_for.as_slice() != locales)
+        {
+            *slot = Some((locales.to_vec(), build_errors_bundle(locales)));
+        }
+        let bundle = slot.as_ref()?.1.as_ref()?;
         let message = bundle.get_message(id)?.value()?;
         let mut errs = Vec::new();
         Some(bundle.format_pattern(message, args, &mut errs).to_string())
@@ -188,12 +196,14 @@ static CHECKSUM_FLUENT: OnceLock<FluentResource> = OnceLock::new();
 // process can host several utilities (e.g. nushell) and switch between them, so
 // each source is parsed and leaked once instead of on every switch
 static RESOURCES: Mutex<BTreeMap<String, &'static FluentResource>> = Mutex::new(BTreeMap::new());
+/// The locales an error-strings bundle was built for, and the bundle (`None`: there are none).
+type ErrorsBundle = (Vec<LanguageIdentifier>, Option<FluentBundle<FluentResource>>);
+
 thread_local! {
     static LOCALIZER: RefCell<Option<Localizer>> = const { RefCell::new(None) };
     /// Built on the first lookup that misses every ordinary bundle; `None`
     /// when there are no error strings to be found at all.
-    static ERRORS_BUNDLE: OnceLock<Option<FluentBundle<FluentResource>>> =
-        const { OnceLock::new() };
+    static ERRORS_BUNDLE: RefCell<Option<ErrorsBundle>> = const { RefCell::new(None) };
 }
 
 /// Helper function to find the uucore locales directory from a utility's locales directory

@@ -21,6 +21,7 @@
 //! `uniq`
 //!
 
+#[cfg(test)]
 use std::env;
 
 /// '199209' for POSIX 1003.2-1992, which would define Obsolete mode
@@ -34,7 +35,7 @@ pub const MODERN: usize = 200_809;
 
 /// Returns the value of the `_POSIX2_VERSION` environment variable if it is defined
 pub fn posix_version() -> Option<usize> {
-    env::var("_POSIX2_VERSION")
+    crate::inproc::var("_POSIX2_VERSION")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
 }

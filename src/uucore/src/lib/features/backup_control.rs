@@ -222,7 +222,7 @@ pub fn determine_backup_suffix(matches: &ArgMatches) -> String {
     let suffix = if let Some(suffix) = supplied_suffix {
         String::from(suffix)
     } else {
-        env::var("SIMPLE_BACKUP_SUFFIX").unwrap_or_else(|_| DEFAULT_BACKUP_SUFFIX.to_owned())
+        crate::inproc::var("SIMPLE_BACKUP_SUFFIX").unwrap_or_else(|_| DEFAULT_BACKUP_SUFFIX.to_owned())
     };
     if suffix.is_empty() || suffix.contains('/') {
         DEFAULT_BACKUP_SUFFIX.to_owned()

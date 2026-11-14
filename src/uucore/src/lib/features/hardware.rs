@@ -43,7 +43,6 @@
 //! ```
 
 use std::collections::BTreeSet;
-use std::env;
 use std::sync::OnceLock;
 
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
@@ -206,7 +205,7 @@ impl SimdPolicy {
     }
 
     fn detect_impl() -> Self {
-        let tunables = env::var("GLIBC_TUNABLES").unwrap_or_default();
+        let tunables = crate::inproc::var("GLIBC_TUNABLES").unwrap_or_default();
         let disabled_by_env = parse_disabled_features(&tunables);
         let hardware_features = CpuFeatures::detect();
 

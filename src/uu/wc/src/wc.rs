@@ -284,7 +284,7 @@ impl<'a> Input<'a> {
     /// will ultimately be printed.
     fn try_as_files0(&self) -> UResult<Option<Vec<Input<'static>>>> {
         match self {
-            Self::Path(path) => match fs::metadata(path) {
+            Self::Path(path) => match fs::metadata(uucore::inproc::resolve(path)) {
                 Ok(meta) if meta.is_file() && meta.len() <= (10 << 20) => Ok(Some(
                     files0_iter_file(path)?.collect::<Result<Vec<_>, _>>()?,
                 )),
@@ -805,7 +805,7 @@ fn compute_number_width(inputs: &Inputs, settings: &Settings) -> usize {
                 match input {
                     Input::Stdin(_) => minimum_width = MINIMUM_WIDTH,
                     Input::Path(path) => {
-                        if let Ok(meta) = fs::metadata(path) {
+                        if let Ok(meta) = fs::metadata(uucore::inproc::resolve(path)) {
                             if meta.is_file() {
                                 total += meta.len();
                             } else {
@@ -1052,6 +1052,11 @@ fn wc(inputs: &Inputs, settings: &Settings) -> UResult<()> {
             let maybe_title = input.to_title();
             let maybe_title_str = maybe_title.as_deref();
             if let Err(err) = print_stats(settings, &word_count, maybe_title_str, number_width) {
+                if err.kind() == io::ErrorKind::BrokenPipe {
+                    // Skua: bash reports a SIGPIPE death as 141, without a message. Returned,
+                    // not `exit`ed: no unwind needed in a host.
+                    return Err(uucore::error::USimpleError::new(141, String::new()));
+                }
                 let title = maybe_title_str.unwrap_or(OsStr::new("<stdin>"));
                 show!(err.map_err_context(|| translate!("wc-error-failed-to-print-result", "title" => title.to_string_lossy())));
                 return Ok(());
@@ -1068,6 +1073,9 @@ fn wc(inputs: &Inputs, settings: &Settings) -> UResult<()> {
         let wc_total_msg = translate!("wc-total");
         let title = are_stats_visible.then_some(OsStr::new(&wc_total_msg));
         if let Err(err) = print_stats(settings, &total_word_count, title, number_width) {
+            if err.kind() == io::ErrorKind::BrokenPipe {
+                return Err(uucore::error::USimpleError::new(141, String::new()));
+            }
             show!(err.map_err_context(|| translate!("wc-error-failed-to-print-total")));
         }
     }

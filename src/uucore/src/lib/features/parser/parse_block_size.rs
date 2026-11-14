@@ -52,7 +52,7 @@ impl BlockSizeEnv {
 /// - `ls` (allocation): `block_size_from_env(&["BLOCKSIZE"])`
 pub fn block_size_from_env(vars: &[&str]) -> BlockSizeEnv {
     for var in vars {
-        if let Ok(s) = std::env::var(var) {
+        if let Ok(s) = crate::inproc::var(var) {
             return match parse_size_non_zero_u64(&s) {
                 Ok(n) => BlockSizeEnv::Found(n),
                 Err(_) => BlockSizeEnv::SetButInvalid,
@@ -66,7 +66,7 @@ pub fn block_size_from_env(vars: &[&str]) -> BlockSizeEnv {
 ///
 /// Returns 512 if `POSIXLY_CORRECT` is set, 1024 otherwise.
 pub fn default_block_size() -> u64 {
-    if std::env::var("POSIXLY_CORRECT").is_ok() {
+    if crate::inproc::var("POSIXLY_CORRECT").is_ok() {
         512
     } else {
         1024

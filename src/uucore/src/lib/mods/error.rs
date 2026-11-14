@@ -178,7 +178,16 @@ mod windows_pipe {
 /// stderr is unbuffered, so the line is formatted first and written at once.
 #[doc(hidden)]
 pub fn print_diagnostic(prefix: &str, msg: std::fmt::Arguments<'_>) {
-    exit_if_stdout_pipe_closed();
+    if crate::inproc::active() {
+        // Inside a host: no exit (that is an unwind); the diagnostic is dropped, as the exit
+        // would have dropped it, and the run ends with status 141.
+        if crate::inproc::stdout_is_closed_pipe() == Some(true) {
+            crate::inproc::note_pipe_closed();
+            return;
+        }
+    } else {
+        exit_if_stdout_pipe_closed();
+    }
     let line = format!("{}: {prefix}{msg}\n", crate::util_name());
     let _ = crate::inproc::stderr().write_all(line.as_bytes());
 }
