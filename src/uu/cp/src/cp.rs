@@ -1591,7 +1591,7 @@ fn construct_dest_path(
     if options.no_target_dir && target.is_dir() {
         return Err(
             translate!("cp-error-cannot-overwrite-directory-with-non-directory",
-                              "dir" => target.quote())
+                              "dir" => target.quote(), "source" => source_path.quote())
             .into(),
         );
     }

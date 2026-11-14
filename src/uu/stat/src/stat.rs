@@ -736,11 +736,14 @@ fn print_unsigned_oct(
     precision: Precision,
     padding_char: Padding,
 ) {
-    let prefix = if flags.alter { "0" } else { "" };
-    let s = match precision {
-        Precision::NotSpecified | Precision::NoNumber => format!("{prefix}{num:o}"),
-        Precision::Number(p) => format!("{prefix}{num:0>p$o}"),
+    let mut s = match precision {
+        Precision::NotSpecified | Precision::NoNumber => format!("{num:o}"),
+        Precision::Number(p) => format!("{num:0>p$o}"),
     };
+    // `#` makes the number start with a 0, adding one only when needed.
+    if flags.alter && !s.starts_with('0') {
+        s.insert(0, '0');
+    }
     pad_and_print(&s, flags.left, width, padding_char);
 }
 
@@ -852,11 +855,13 @@ impl Stater {
             check_bound(format_str, bound, old, j)?;
 
             let j_byte = char_index_to_byte_index(format_str, j);
-            match format_str[j_byte..].scan_num::<i32>() {
+            // A sign after '.' is not part of the precision.
+            match format_str[j_byte..]
+                .scan_num::<i32>()
+                .filter(|_| chars[j].is_ascii_digit())
+            {
                 Some((value, offset)) => {
-                    if value >= 0 {
-                        precision = Precision::Number(value as usize);
-                    }
+                    precision = Precision::Number(value as usize);
                     j += offset;
                 }
                 None => precision = Precision::NoNumber,
@@ -1735,9 +1740,12 @@ mod tests {
                     ..Default::default()
                 },
                 width: 20,
-                precision: Precision::NotSpecified,
-                format: 'w',
+                precision: Precision::NoNumber,
+                format: '-',
             },
+            Token::Char('2'),
+            Token::Char('3'),
+            Token::Char('w'),
             Token::Byte(b'\x12'),
             Token::Byte(b'w'),
             Token::Byte(b'Z'),
