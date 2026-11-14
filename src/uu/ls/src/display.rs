@@ -1416,6 +1416,15 @@ fn calculate_padding_collection(
             continue;
         }
 
+        // Skua: these columns exist only in the long format. Without it, the work below (hard
+        // link count: one open per file; owner and group lookups) was thrown away. The metadata is
+        // still fetched, so an unreadable entry reports its error as before.
+        #[cfg(not(unix))]
+        if config.format != Format::Long {
+            let _ = item.metadata();
+            continue;
+        }
+
         let context_len = item.security_context(config).len();
         #[cfg_attr(not(unix), allow(unused_variables))]
         let (link_count_len, uname_len, group_len, size_len, major_len, minor_len) =
