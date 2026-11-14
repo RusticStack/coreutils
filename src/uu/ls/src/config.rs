@@ -132,6 +132,29 @@ const POSIXLY_CORRECT_BLOCK_SIZE: u64 = 512;
 const DEFAULT_BLOCK_SIZE: u64 = 1024;
 const DEFAULT_FILE_SIZE_BLOCK_SIZE: u64 = 1;
 
+/// Skua: the suffix GNU `ls` prints after sizes for a block size given as a unit without a
+/// leading number: `K`/`k` -> `K`, `KB`/`kB` -> `kB`, `KiB` -> `KiB`, `M` -> `M`, `MB` -> `MB`
+/// (GNU's `human_options`: no digits means "print the unit"). A spec with a number (`1K`,
+/// `1000`) prints none. A leading `'` (thousands grouping, not done here) is skipped.
+pub(crate) fn block_size_suffix(spec: &str) -> String {
+    let spec = spec.trim_start_matches('\'');
+    let mut chars = spec.chars();
+    let Some(first) = chars.next() else {
+        return String::new();
+    };
+    let letter = first.to_ascii_uppercase();
+    if !"KMGTPEZYRQ".contains(letter) {
+        return String::new();
+    }
+    match chars.as_str() {
+        "" => letter.to_string(),
+        "B" if letter == 'K' => "kB".to_owned(),
+        "B" => format!("{letter}B"),
+        "iB" => format!("{letter}iB"),
+        _ => String::new(),
+    }
+}
+
 /// Resolve `(file_size_block_size, block_size)` from environment variables.
 ///
 /// `LS_BLOCK_SIZE` and `BLOCK_SIZE` affect both values.
@@ -231,6 +254,9 @@ pub struct Config {
     pub(crate) file_size_block_size: u64,
     #[allow(dead_code)]
     pub(crate) block_size: u64, // is never read on Windows
+    /// Skua: the unit GNU prints after each size when the block size was given as a unit
+    /// without a number (`--block-size=K` gives `2K`, `KB` gives `2kB`); empty otherwise.
+    pub(crate) size_suffix: String,
     pub(crate) width: u16,
     // Dir and vdir needs access to this field
     pub quoting_style: QuotingStyle,
@@ -771,6 +797,20 @@ impl Config {
             (DEFAULT_FILE_SIZE_BLOCK_SIZE, DEFAULT_BLOCK_SIZE)
         };
 
+        // Skua: GNU prints the unit after sizes for a block size that is a bare unit, from the
+        // option or from LS_BLOCK_SIZE / BLOCK_SIZE (the first one set), as in GNU's human.c.
+        let size_suffix = if opt_si || opt_hr {
+            String::new()
+        } else if let Some(spec) = opt_block_size {
+            block_size_suffix(spec)
+        } else {
+            ["LS_BLOCK_SIZE", "BLOCK_SIZE"]
+                .iter()
+                .find_map(|v| std::env::var(v).ok())
+                .map(|spec| block_size_suffix(&spec))
+                .unwrap_or_default()
+        };
+
         let long = {
             let author = options.get_flag(options::AUTHOR);
             let group = !options.get_flag(options::NO_GROUP)
@@ -969,6 +1009,7 @@ impl Config {
             alloc_size: options.get_flag(options::size::ALLOCATION_SIZE),
             file_size_block_size,
             block_size,
+            size_suffix,
             width,
             quoting_style,
             show_control_chars: options.get_flag(options::SHOW_CONTROL_CHARS),
@@ -1079,5 +1120,33 @@ fn parse_time_style(options: &clap::ArgMatches) -> Result<(String, Option<String
         ok((format::FULL_ISO, None))
     } else {
         ok(LOCALE_FORMAT)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::block_size_suffix;
+
+    #[test]
+    fn block_size_suffix_as_gnu() {
+        for (spec, suffix) in [
+            ("K", "K"),
+            ("k", "K"),
+            ("KB", "kB"),
+            ("kB", "kB"),
+            ("KiB", "KiB"),
+            ("M", "M"),
+            ("MB", "MB"),
+            ("MiB", "MiB"),
+            ("G", "G"),
+            ("'K", "K"),
+            ("1K", ""),
+            ("1000", ""),
+            ("", ""),
+            ("B", ""),
+            ("Kx", ""),
+        ] {
+            assert_eq!(block_size_suffix(spec), suffix, "{spec}");
+        }
     }
 }

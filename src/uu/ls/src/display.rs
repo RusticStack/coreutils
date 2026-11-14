@@ -717,7 +717,12 @@ fn display_len_or_rdev(metadata: &Metadata, config: &Config) -> SizeOrDeviceId {
 }
 
 pub fn display_size(size: u64, config: &Config) -> String {
-    human_readable(size, config.size_format)
+    let mut s = human_readable(size, config.size_format);
+    // Skua: `--block-size=K` prints `2K` as GNU (empty suffix otherwise).
+    if matches!(config.size_format, uucore::format::human::SizeFormat::Bytes) {
+        s.push_str(&config.size_suffix);
+    }
+    s
 }
 
 /// Takes a [`PathData`] struct and returns a cell with a name ready for displaying.

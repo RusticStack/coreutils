@@ -6766,6 +6766,49 @@ fn test_ls_invalid_block_size() {
         .stderr_is("ls: invalid --block-size argument '0'\n");
 }
 
+/// Skua: a block size given as a bare unit prints that unit after each size, as GNU `ls`
+/// (`--block-size=K` gives `2K`, `KB` gives `2kB`); one with a number prints none. Not
+/// Windows-specific: upstream prints no unit on any platform.
+#[test]
+fn test_ls_block_size_unit_suffix() {
+    let scene = TestScenario::new(util_name!());
+    scene.fixtures.write("f", &"x".repeat(1500));
+    for (spec, size) in [
+        ("K", " 2K "),
+        ("k", " 2K "),
+        ("KB", " 2kB "),
+        ("KiB", " 2KiB "),
+        ("M", " 1M "),
+        ("MB", " 1MB "),
+        ("1K", " 2 "),
+        ("1000", " 2 "),
+    ] {
+        scene
+            .ucmd()
+            .arg("-l")
+            .arg(format!("--block-size={spec}"))
+            .arg("f")
+            .succeeds()
+            .stdout_contains(size);
+    }
+    scene
+        .ucmd()
+        .arg("-l")
+        .arg("f")
+        .env("BLOCK_SIZE", "K")
+        .succeeds()
+        .stdout_contains(" 2K ");
+    // `-h` keeps its own units.
+    scene
+        .ucmd()
+        .arg("-l")
+        .arg("--block-size=K")
+        .arg("-h")
+        .arg("f")
+        .succeeds()
+        .stdout_contains(" 1.5K ");
+}
+
 #[cfg(all(unix, feature = "dd"))]
 #[test]
 #[cfg(not(target_os = "openbsd"))]
