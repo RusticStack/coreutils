@@ -2244,10 +2244,10 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
         None => std::thread::available_parallelism().map_or(1, |n| n.get() as u64),
     };
     // WASI doesn't support threads, so the value is only validated there
+    // Skua: the pool is built at the first parallel sort (`sort_by`), not here: building it
+    // starts one thread per CPU, which small inputs never need.
     #[cfg(not(target_os = "wasi"))]
-    let _ = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads as usize)
-        .build_global();
+    POOL_THREADS.store(threads as usize, std::sync::atomic::Ordering::Relaxed);
     #[cfg(target_os = "wasi")]
     let _ = threads;
 
@@ -2749,8 +2749,39 @@ fn exec(
     }
 }
 
+/// Thread count for rayon's global pool, set from `--parallel` (or the CPU count).
+#[cfg(not(target_os = "wasi"))]
+static POOL_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(not(target_os = "wasi"))]
+static POOL_INIT: std::sync::Once = std::sync::Once::new();
+
+/// Below this many lines a sequential sort is as fast as the thread pool and starts no threads.
+/// Both give the same order: ties only remain between identical lines or are ordered by input position.
+#[cfg(not(target_os = "wasi"))]
+const PARALLEL_SORT_MIN_LINES: usize = 8192;
+
+#[cfg(not(target_os = "wasi"))]
+fn ensure_pool() {
+    POOL_INIT.call_once(|| {
+        let _ = rayon::ThreadPoolBuilder::new()
+            .num_threads(POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed))
+            .build_global();
+    });
+}
+
 fn sort_by<'a>(unsorted: &mut Vec<Line<'a>>, settings: &GlobalSettings, line_data: &LineData<'a>) {
     let cmp = |a: &Line<'a>, b: &Line<'a>| compare_by(a, b, settings, line_data, line_data);
+    #[cfg(not(target_os = "wasi"))]
+    if unsorted.len() < PARALLEL_SORT_MIN_LINES {
+        if settings.stable || settings.unique {
+            unsorted.sort_by(cmp);
+        } else {
+            unsorted.sort_unstable_by(cmp);
+        }
+        return;
+    }
+    #[cfg(not(target_os = "wasi"))]
+    ensure_pool();
     // WASI does not support threads, so use non-parallel sort to avoid
     // rayon's thread pool which triggers an unreachable trap.
     if settings.stable || settings.unique {
