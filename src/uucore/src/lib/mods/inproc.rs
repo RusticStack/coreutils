@@ -798,3 +798,113 @@ mod imp {
         }
     }
 }
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use std::fs::File;
+    use std::io::Write as _;
+    use std::os::windows::io::AsRawHandle as _;
+    use std::path::{Path, PathBuf};
+
+    fn temp(name: &str) -> (File, PathBuf) {
+        let path =
+            std::env::temp_dir().join(format!("uucore-inproc-{}-{name}", std::process::id()));
+        (File::create(&path).unwrap(), path)
+    }
+
+    fn invocation(util: &'static str, files: [&File; 3], env: &[(&str, &str)]) -> Invocation {
+        Invocation {
+            util_name: util,
+            stdin: files[0].as_raw_handle(),
+            stdout: files[1].as_raw_handle(),
+            stderr: files[2].as_raw_handle(),
+            env: env
+                .iter()
+                .map(|(k, v)| ((*k).into(), (*v).into()))
+                .collect(),
+            cwd: std::env::temp_dir(),
+            cancel: CancelToken::new(),
+        }
+    }
+
+    #[test]
+    fn exit_panic_and_name_are_contained() {
+        let (f, p) = temp("a");
+        let inv = invocation("cat", [&f, &f, &f], &[]);
+        assert_eq!(run(inv, || exit(7)), 7);
+        assert!(!active());
+        let inv = invocation("cat", [&f, &f, &f], &[]);
+        assert_eq!(run(inv, || panic!("boom")), 101);
+        let inv = invocation("wc", [&f, &f, &f], &[]);
+        assert_eq!(run(inv, || i32::from(crate::util_name() != "wc")), 0);
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn streams_env_and_resolve_follow_the_context() {
+        let (f, p) = temp("b");
+        let inv = invocation("cat", [&f, &f, &f], &[("LANG", "x"), ("Path", "y")]);
+        let code = run(inv, || {
+            write!(stdout(), "out").unwrap();
+            write!(stderr(), "err").unwrap();
+            assert_eq!(var("lang").unwrap(), "x");
+            assert!(var_os("NOPE").is_none());
+            assert_eq!(
+                resolve("a.txt").as_ref(),
+                std::env::temp_dir().join("a.txt")
+            );
+            assert_eq!(resolve(r"C:\dir.txt").as_ref(), Path::new(r"C:\dir.txt"));
+            0
+        });
+        assert_eq!(code, 0);
+        drop(f);
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("err") && text.contains("out"), "{text}");
+        let _ = std::fs::remove_file(p);
+    }
+
+    #[test]
+    fn two_utilities_run_at_once() {
+        let handles: Vec<_> = ["one", "two"]
+            .into_iter()
+            .map(|n| {
+                std::thread::spawn(move || {
+                    let (f, p) = temp(n);
+                    let util: &'static str = if n == "one" { "cat" } else { "wc" };
+                    let inv = invocation(util, [&f, &f, &f], &[]);
+                    let code = run(inv, || {
+                        for _ in 0..1000 {
+                            writeln!(stdout(), "{}", crate::util_name()).unwrap();
+                        }
+                        set_exit_code(if n == "one" { 3 } else { 4 });
+                        crate::error::get_exit_code()
+                    });
+                    drop(f);
+                    let text = std::fs::read_to_string(&p).unwrap();
+                    let _ = std::fs::remove_file(p);
+                    (code, text, util)
+                })
+            })
+            .collect();
+        for h in handles {
+            let (code, text, util) = h.join().unwrap();
+            assert!(code == 3 || code == 4);
+            assert_eq!(text.lines().count(), 1000);
+            assert!(text.lines().all(|l| l == util));
+        }
+    }
+
+    #[test]
+    fn cancelled_run_ends_at_its_next_stream_call() {
+        let (f, p) = temp("c");
+        let inv = invocation("cat", [&f, &f, &f], &[]);
+        inv.cancel.cancel();
+        let code = run(inv, || {
+            let _ = writeln!(stdout(), "never");
+            0
+        });
+        assert_eq!(code, 130);
+        let _ = std::fs::remove_file(p);
+    }
+}
