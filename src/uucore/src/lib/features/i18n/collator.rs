@@ -215,6 +215,10 @@ mod windows_collator {
 
         /// `LCMapStringEx(locale, LCMAP_SORTKEY, ..)`: byte keys that compare as
         /// [`Self::compare_utf8`] does.
+        #[expect(
+            clippy::unnecessary_wraps,
+            reason = "same signature as ICU's Collator::write_sort_key_utf8_to"
+        )]
         pub fn write_sort_key_utf8_to(
             &self,
             input: &[u8],
