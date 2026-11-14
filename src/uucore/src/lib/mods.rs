@@ -8,6 +8,7 @@
 pub mod clap_localization;
 pub mod display;
 pub mod error;
+pub mod inproc;
 #[cfg(all(feature = "fs", any(unix, windows, target_os = "wasi")))]
 pub mod io;
 pub mod line_ending;

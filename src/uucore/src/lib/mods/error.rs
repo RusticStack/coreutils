@@ -102,7 +102,7 @@ pub fn set_exit_code(code: i32) {
 pub fn exit_if_stdout_pipe_closed() {
     #[cfg(windows)]
     if windows_pipe::stdout_pipe_closed() {
-        std::process::exit(141);
+        crate::inproc::exit(141);
     }
 }
 

@@ -41,7 +41,9 @@ pub use uucore_procs::*;
 // * cross-platform modules
 #[cfg(all(feature = "fs", any(unix, windows, target_os = "wasi")))]
 pub use crate::mods::io;
-pub use crate::mods::{clap_localization, display, error, line_ending, locale, os, panic, posix};
+pub use crate::mods::{
+    clap_localization, display, error, inproc, line_ending, locale, os, panic, posix,
+};
 
 // * feature-gated modules
 #[cfg(feature = "backup-control")]
@@ -422,6 +424,9 @@ static UTIL_NAME: LazyLock<String> = LazyLock::new(|| {
 
 /// Derive the utility name.
 pub fn util_name() -> &'static str {
+    if let Some(name) = crate::mods::inproc::name_override() {
+        return name;
+    }
     &UTIL_NAME
 }
 
@@ -442,6 +447,9 @@ static EXECUTION_PHRASE: LazyLock<String> = LazyLock::new(|| {
 
 /// Derive the complete execution phrase for "usage".
 pub fn execution_phrase() -> &'static str {
+    if let Some(name) = crate::mods::inproc::name_override() {
+        return name;
+    }
     &EXECUTION_PHRASE
 }
 
