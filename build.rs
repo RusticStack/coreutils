@@ -19,6 +19,23 @@ pub fn main() {
     // See <https://doc.rust-lang.org/cargo/reference/build-scripts.html#change-detection>
     println!("cargo:rerun-if-changed=build.rs");
 
+    // Skua: delay-load the DLLs that only rare code paths use, so a start of `cat`, `ls`, `wc`
+    // does not map and initialise them (user32 alone costs about 1 ms, the others a few tenths
+    // each). Each is loaded by the Windows delay-load helper at the first call into it:
+    //   user32 (more, crossterm keys), wtsapi32 (uptime, users, who), version (uname),
+    //   ws2_32 (hostname), mpr (df, stat -f network drives), advapi32 (owners, ACLs, user names),
+    //   bcrypt (hashing random state).
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc")
+        && env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+    {
+        for dll in [
+            "user32", "wtsapi32", "version", "ws2_32", "mpr", "advapi32", "bcrypt",
+        ] {
+            println!("cargo:rustc-link-arg-bin=coreutils=/DELAYLOAD:{dll}.dll");
+        }
+        println!("cargo:rustc-link-arg-bin=coreutils=delayimp.lib");
+    }
+
     // Check for tldr.zip when building uudoc to warn users once at build time
     // instead of repeatedly at runtime for each utility.
     // Skua: only uudoc reads the archive; watching a file that is missing makes cargo rebuild
