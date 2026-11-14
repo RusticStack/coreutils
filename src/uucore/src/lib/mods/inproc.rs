@@ -503,7 +503,11 @@ mod imp {
     /// run such a request in the process).
     pub fn resolve(path: &(impl AsRef<Path> + ?Sized)) -> Cow<'_, Path> {
         let path = path.as_ref();
-        if !active() || matches!(path.components().next(), Some(Component::Prefix(_))) {
+        // An empty name stays empty: a child's open of "" fails, the directory's would not.
+        if !active()
+            || path.as_os_str().is_empty()
+            || matches!(path.components().next(), Some(Component::Prefix(_)))
+        {
             return Cow::Borrowed(path);
         }
         // `join` does both: a relative path is appended, a rooted one replaces everything but
@@ -1243,6 +1247,7 @@ mod tests {
             (r"D:\work\sub", r"\file.txt", r"D:\file.txt"),
             (r"D:\work\sub", "/file.txt", r"D:\file.txt"),
             (r"D:\work\sub", r"rel\x", r"D:\work\sub\rel\x"),
+            (r"D:\work\sub", "", ""),
             (r"D:\work\sub", r"C:\abs\x", r"C:\abs\x"),
             (r"D:\work\sub", r"\\srv\share\x", r"\\srv\share\x"),
             (r"\\srv\share\dir", r"\file.txt", r"\\srv\share\file.txt"),
