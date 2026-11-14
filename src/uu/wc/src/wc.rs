@@ -761,7 +761,7 @@ enum CountResult {
 fn word_count_from_input(input: &Input<'_>, settings: &Settings) -> CountResult {
     let (total, maybe_err) = match input {
         Input::Stdin(_) => word_count_from_reader(uucore::inproc::stdin().lock(), settings),
-        Input::Path(path) => match File::open(uucore::inproc::resolve(path)) {
+        Input::Path(path) => match uucore::inproc::open(path) {
             Ok(f) => word_count_from_reader(f, settings),
             Err(err) => return CountResult::Failure(err),
         },

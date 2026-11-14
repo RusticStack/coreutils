@@ -68,6 +68,19 @@ impl WordCountable for StdinLock<'_> {
     }
 }
 
+#[cfg(windows)]
+impl WordCountable for uucore::inproc::CtxFile {
+    type Buffered = BufReader<Self>;
+
+    fn buffered(self) -> Self::Buffered {
+        BufReader::new(self)
+    }
+
+    fn inner_file(&mut self) -> Option<&mut File> {
+        Some(self.get_mut())
+    }
+}
+
 #[cfg(not(target_os = "wasi"))]
 impl WordCountable for File {
     type Buffered = BufReader<Self>;

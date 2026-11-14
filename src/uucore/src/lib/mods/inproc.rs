@@ -69,6 +69,14 @@ mod other {
     pub fn stdout_is_closed_pipe() -> Option<bool> {
         None
     }
+    /// Never a context on this platform: nothing to note.
+    pub fn note_pipe_closed() {}
+    /// A file opened for reading by a utility (the std one on this platform).
+    pub type CtxFile = std::fs::File;
+    /// `File::open`.
+    pub fn open(path: impl AsRef<Path>) -> std::io::Result<CtxFile> {
+        std::fs::File::open(path)
+    }
 }
 
 #[cfg(windows)]
@@ -293,6 +301,33 @@ mod imp {
             EXIT_CODE.with(|c| c.set(code));
         }
         on
+    }
+
+    /// A file a utility reads (see [`open`]): reads fail with [`Cancelled`] once the run has been
+    /// cancelled, so a loop over a file stops at its next read even when none is blocked (which
+    /// is all `CancelSynchronousIo` can interrupt).
+    #[derive(Debug)]
+    pub struct CtxFile(File);
+
+    impl CtxFile {
+        /// The underlying file, for the metadata and seek calls of fast paths.
+        pub fn get_mut(&mut self) -> &mut File {
+            &mut self.0
+        }
+    }
+
+    impl Read for CtxFile {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if cancelled() {
+                return Err(io::Error::other(Cancelled));
+            }
+            self.0.read(buf)
+        }
+    }
+
+    /// `File::open` of `path` made relative to the context's directory (see [`resolve`]).
+    pub fn open(path: impl AsRef<Path>) -> io::Result<CtxFile> {
+        File::open(resolve(path.as_ref())).map(CtxFile)
     }
 
     /// Whether this thread's run has been cancelled.
@@ -1003,6 +1038,31 @@ mod tests {
         });
         assert_eq!(code, 130);
         let _ = std::fs::remove_file(p);
+    }
+
+    /// A file a utility opens through `open` is read relative to the context's directory, and its
+    /// reads end at a cancel even though none is blocked.
+    #[test]
+    fn opened_files_resolve_and_stop_at_a_cancel() {
+        let (mut f, p) = temp("file");
+        f.write_all(&vec![b'z'; 100_000]).unwrap();
+        drop(f);
+        let (log, lp) = temp("filelog");
+        let mut inv = invocation("wc", [&log, &log, &log], &[]);
+        inv.cwd = p.parent().unwrap().to_owned();
+        let token = std::sync::Arc::clone(&inv.cancel);
+        let name = p.file_name().unwrap().to_owned();
+        let code = run(inv, || {
+            let mut file = open(&name).unwrap();
+            let mut buf = [0u8; 4096];
+            assert_eq!(file.read(&mut buf).unwrap(), 4096);
+            token.cancel();
+            assert!(file.read(&mut buf).is_err_and(|e| is_cancelled_error(&e)));
+            0
+        });
+        assert_eq!(code, 130);
+        let _ = std::fs::remove_file(p);
+        let _ = std::fs::remove_file(lp);
     }
 
     /// Cancelling while output is still buffered must neither unwind nor abort: the buffered
