@@ -762,7 +762,7 @@ pub mod msys {
         let group_buf = token_info(&token, TokenPrimaryGroup)?;
         // SAFETY: GetTokenInformation(TokenPrimaryGroup) filled it with a TOKEN_PRIMARY_GROUP.
         let group_sid = unsafe { (*group_buf.as_ptr().cast::<TOKEN_PRIMARY_GROUP>()).PrimaryGroup };
-        let group_domain = account(group_sid).map(|(_, d)| d).unwrap_or_default();
+        let group_domain = account(group_sid).map_or_default(|(_, d)| d);
         let gid = posix_id(group_sid, is_local(&group_domain));
 
         Some(Owner {

@@ -700,8 +700,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     let (in_file_name, out_file_name) = files
         .map(|fi| fi.map(AsRef::as_ref))
-        .map(|mut fi| (fi.next(), fi.next()))
-        .unwrap_or_default();
+        .map_or_default(|mut fi| (fi.next(), fi.next()));
 
     let skip_fields_modern: Option<usize> = opt_parsed(options::SKIP_FIELDS, &matches)?;
     let skip_chars_modern: Option<usize> = opt_parsed(options::SKIP_CHARS, &matches)?;

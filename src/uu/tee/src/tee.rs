@@ -42,8 +42,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     let files = matches
         .get_many::<OsString>(options::FILE)
-        .map(|v| v.cloned().collect())
-        .unwrap_or_default();
+        .map_or_default(|v| v.cloned().collect());
 
     let options = Options {
         append,

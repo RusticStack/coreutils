@@ -837,8 +837,7 @@ impl<'a> Pager<'a> {
         let progress_info = if self.eof_reached {
             self.next_file
                 .as_ref()
-                .map(|next_file| format!(" (Next file: {next_file})"))
-                .unwrap_or_default()
+                .map_or_default(|next_file| format!(" (Next file: {next_file})"))
         } else if let Some(file_size) = self.input.len() {
             // For files, show percentage or END
             let position = self

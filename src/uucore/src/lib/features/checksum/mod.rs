@@ -410,14 +410,12 @@ impl SizedAlgoKind {
             Self::Shake128(len_opt) => Box::new(
                 len_opt
                     .map(HashLength::as_bits)
-                    .map(Shake128::with_output_bits)
-                    .unwrap_or_default(),
+                    .map_or_default(Shake128::with_output_bits),
             ),
             Self::Shake256(len_opt) => Box::new(
                 len_opt
                     .map(HashLength::as_bits)
-                    .map(Shake256::with_output_bits)
-                    .unwrap_or_default(),
+                    .map_or_default(Shake256::with_output_bits),
             ),
         }
     }

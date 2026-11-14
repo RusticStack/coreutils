@@ -271,8 +271,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     let files: Vec<_> = matches
         .get_many::<OsString>(ARG_FILES)
-        .map(|v| v.map(OsString::as_os_str).collect())
-        .unwrap_or_default();
+        .map_or_default(|v| v.map(OsString::as_os_str).collect());
 
     let force_flag = matches.get_flag(OPT_FORCE);
 

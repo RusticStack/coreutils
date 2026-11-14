@@ -83,8 +83,7 @@ impl<'a> Settings<'a> {
 
         let total_when = matches
             .get_one::<String>(options::TOTAL)
-            .map(Into::into)
-            .unwrap_or_default();
+            .map_or_default(Into::into);
 
         let show_chars = matches.get_flag(options::CHAR);
         let settings = Self {
