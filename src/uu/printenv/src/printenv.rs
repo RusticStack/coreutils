@@ -26,8 +26,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     let variables: Vec<String> = matches
         .get_many::<String>(ARG_VARIABLES)
-        .map(|v| v.map(ToString::to_string).collect())
-        .unwrap_or_default();
+        .map_or_default(|v| v.map(ToString::to_string).collect());
 
     let maybe_quoting_style = matches
         .get_one::<String>(qs_parser::QUOTING_STYLE)

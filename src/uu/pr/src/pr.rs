@@ -1071,11 +1071,7 @@ fn build_options(
     let join_lines = matches.get_flag(options::JOIN_LINES);
 
     let col_sep_for_printing = column_mode_options.as_ref().map_or_else(
-        || {
-            merge_files_print
-                .map(|_k| DEFAULT_COLUMN_SEPARATOR.to_string())
-                .unwrap_or_default()
-        },
+        || merge_files_print.map_or_default(|_k| DEFAULT_COLUMN_SEPARATOR.to_string()),
         |i| i.column_separator.clone(),
     );
 

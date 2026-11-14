@@ -17,11 +17,10 @@ fn file_last_modified_time_format(ucmd: &UCommand, path: &str, format: &str) -> 
     let tmp_dir_path = ucmd.get_full_fixture_path(path);
     metadata(tmp_dir_path)
         .and_then(|meta| meta.modified())
-        .map(|mtime| {
+        .map_or_default(|mtime| {
             let dt: Timestamp = mtime.try_into().unwrap();
             dt.strftime(format).to_string()
         })
-        .unwrap_or_default()
 }
 
 fn file_last_modified_time(ucmd: &UCommand, path: &str) -> String {

@@ -2169,8 +2169,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let mut files: Vec<OsString> = if matches.contains_id(options::FILES0_FROM) {
         let files0_from: PathBuf = matches
             .get_one::<OsString>(options::FILES0_FROM)
-            .map(Into::into)
-            .unwrap_or_default();
+            .map_or_default(Into::into);
 
         // Cannot combine FILES with FILES0_FROM
         if let Some(s) = matches.get_one::<OsString>(options::FILES) {
@@ -2207,8 +2206,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     } else {
         matches
             .get_many::<OsString>(options::FILES)
-            .map(|v| v.map(ToOwned::to_owned).collect())
-            .unwrap_or_default()
+            .map_or_default(|v| v.map(ToOwned::to_owned).collect())
     };
 
     let mode_flags = ModeFlags::from_matches(&matches);
@@ -2342,8 +2340,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     let check_modes: Vec<&str> = matches
         .get_many::<String>(options::check::CHECK)
-        .map(|modes| modes.map(String::as_str).collect())
-        .unwrap_or_default();
+        .map_or_default(|modes| modes.map(String::as_str).collect());
     let check_silent = matches.get_flag(options::check::CHECK_SILENT)
         || check_modes
             .iter()

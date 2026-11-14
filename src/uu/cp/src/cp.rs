@@ -831,8 +831,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
 
     let paths: Vec<PathBuf> = matches
         .get_many::<OsString>(options::PATHS)
-        .map(|v| v.map(PathBuf::from).collect())
-        .unwrap_or_default();
+        .map_or_default(|v| v.map(PathBuf::from).collect());
 
     let (sources, target) = parse_path_args(paths, &options)?;
 

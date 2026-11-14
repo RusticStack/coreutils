@@ -195,8 +195,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     let matches = uucore::clap_localization::handle_clap_result(uu_app(), args)?;
     let files: Vec<String> = matches
         .get_many::<String>(ARG_FILES)
-        .map(|v| v.map(ToString::to_string).collect())
-        .unwrap_or_default();
+        .map_or_default(|v| v.map(ToString::to_string).collect());
 
     if matches.get_flag(options::DATA) && files.is_empty() {
         return Err(USimpleError::new(

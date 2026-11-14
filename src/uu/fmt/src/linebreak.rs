@@ -385,7 +385,7 @@ fn build_best_path<'a>(paths: &[LineBreak<'a>], active: &[usize]) -> Vec<(&'a Wo
     active
         .iter()
         .min_by_key(|&&a| paths[a].demerits)
-        .map(|&(mut best_idx)| {
+        .map_or_default(|&(mut best_idx)| {
             let mut breakwords = vec![];
             // now, chase the pointers back through the break list, recording
             // the words at which we should break
@@ -400,7 +400,6 @@ fn build_best_path<'a>(paths: &[LineBreak<'a>], active: &[usize]) -> Vec<(&'a Wo
                 }
             }
         })
-        .unwrap_or_default()
 }
 
 // badness = BAD_MULT * abs(r) ^ 3

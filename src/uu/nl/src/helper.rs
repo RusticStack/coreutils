@@ -38,8 +38,7 @@ pub fn parse_options(settings: &mut crate::Settings, opts: &clap::ArgMatches) ->
     }
     settings.number_format = opts
         .get_one::<String>(options::NUMBER_FORMAT)
-        .map(Into::into)
-        .unwrap_or_default();
+        .map_or_default(Into::into);
     match opts
         .get_one::<String>(options::HEADER_NUMBERING)
         .map(String::as_str)

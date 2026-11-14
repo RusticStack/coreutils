@@ -837,8 +837,7 @@ impl<'a> PathData<'a> {
             PathDataDisplayName::Custom(
                 dir_entry
                     .as_ref()
-                    .map(DirEntry::file_name)
-                    .unwrap_or_default()
+                    .map_or_default(DirEntry::file_name)
                     .into(),
             )
         };

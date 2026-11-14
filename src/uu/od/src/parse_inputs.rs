@@ -21,8 +21,7 @@ pub trait CommandLineOpts {
 impl CommandLineOpts for ArgMatches {
     fn inputs(&self) -> Vec<&OsStr> {
         self.get_many::<OsString>(options::FILENAME)
-            .map(|values| values.map(OsString::as_os_str).collect())
-            .unwrap_or_default()
+            .map_or_default(|values| values.map(OsString::as_os_str).collect())
     }
 
     fn opts_present(&self, opts: &[&str]) -> bool {

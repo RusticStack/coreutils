@@ -807,8 +807,7 @@ impl Config {
             ["LS_BLOCK_SIZE", "BLOCK_SIZE"]
                 .iter()
                 .find_map(|v| std::env::var(v).ok())
-                .map(|spec| block_size_suffix(&spec))
-                .unwrap_or_default()
+                .map_or_default(|spec| block_size_suffix(&spec))
         };
 
         let long = {
