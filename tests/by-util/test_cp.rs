@@ -31,7 +31,7 @@ use std::path::PathBuf;
 
 #[cfg(target_os = "linux")]
 use std::ffi::OsString;
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "android", windows))]
 use std::fs as std_fs;
 use std::thread::sleep;
 use std::time::Duration;
@@ -2979,7 +2979,7 @@ fn test_cp_preserve_timestamps() {
 }
 
 #[test]
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "android", windows))]
 fn test_cp_no_preserve_timestamps() {
     let (at, mut ucmd) = at_and_ucmd!();
     let previous = std::time::SystemTime::now() - Duration::from_secs(3600);

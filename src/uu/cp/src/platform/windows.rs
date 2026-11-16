@@ -221,6 +221,22 @@ fn is_sparse(file: &File) -> std::io::Result<bool> {
     Ok(file.metadata()?.file_attributes() & FILE_ATTRIBUTE_SPARSE_FILE != 0)
 }
 
+/// Plain copy with `fs::copy`, then stamps `dest` with the current time.
+///
+/// `CopyFileExW` gives the destination the source's modification time. GNU `cp`
+/// (and POSIX) leave a new or overwritten file with the time of the copy, and
+/// build tools (cargo, make) rely on that to notice a replaced file. With
+/// `--preserve=timestamps` the source's times are put back afterwards by the
+/// attribute copy.
+fn kernel_copy(source: &Path, dest: &Path) -> std::io::Result<()> {
+    std::fs::copy(source, dest)?;
+    let now = filetime::FileTime::now();
+    // Best effort: the data is already copied; a file system that refuses the
+    // time update must not turn the copy into a failure.
+    filetime::set_file_times(dest, now, now).ok();
+    Ok(())
+}
+
 /// Copies `source` to `dest`, honoring `--sparse` on Windows.
 ///
 /// Windows has no copy-on-write reflink support, so `--reflink=always` is
@@ -270,12 +286,12 @@ pub(crate) fn copy_on_write(
                 // `fs::copy` (`CopyFileExW`) keeps the kernel copy path, ReFS
                 // block cloning and SMB offload on this — the default — copy
                 // path; see the PR discussion for the TOCTOU trade-off.
-                std::fs::copy(source, dest).map_err(context_err)?;
+                kernel_copy(source, dest).map_err(context_err)?;
             }
         }
         // `--sparse=never` performs a plain copy that never introduces holes.
         SparseMode::Never => {
-            std::fs::copy(source, dest).map_err(context_err)?;
+            kernel_copy(source, dest).map_err(context_err)?;
         }
     }
 
